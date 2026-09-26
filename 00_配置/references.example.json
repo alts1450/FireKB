@@ -1,0 +1,21 @@
+{
+  "_说明": "规范条文库配置（**示例**）。它**不是课程**，而是规范的合集，单列一个口径。",
+  "library": {
+    "id": "REFLIB",
+    "name": "规范条文库",
+    "role": "reference",
+    "course_dir": "示例规范目录",
+    "policy": "规范条文不是课程材料：可作引用来源（文件+页码），但不进课表、不生成复习卡片。"
+  },
+  "works": [
+    {
+      "id": "REF-DEMO-1",
+      "name": "示例规范名称",
+      "code": "GB 00000-0000",
+      "kind": "国标",
+      "match": "示例规范名称",
+      "note": "match 是出现在 pages.jsonl 的 source_file 里的子串，由 kb.resolve_reference 解析。"
+    }
+  ],
+  "duplicates": []
+}

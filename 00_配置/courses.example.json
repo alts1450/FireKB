@@ -1,0 +1,36 @@
+{
+  "_说明": "课程配置（**示例**）。请把 courses 数组改成你自己的真实课表；id 会出现在文件名与索引中，建议用英文短码。",
+  "_字段说明": {
+    "id": "课程唯一短码，用于生成课时ID与文件命名",
+    "name": "课程全称",
+    "teacher": "任课教师（可留空）",
+    "weekly_sessions": "每周课次数，用于校验课时是否收齐",
+    "textbook": "教材名称（可留空）",
+    "regulations": "本课涉及的规范编号列表，M5 校验时按此检索条文库",
+    "skeleton_source": "知识骨架来源：outline=教学大纲 / textbook=教材目录 / regulation=规范章节 / manual=人工整理"
+  },
+  "semester": "2026春",
+  "total_weeks": 17,
+  "courses": [
+    {
+      "id": "DEMO-A",
+      "name": "示例课程甲",
+      "teacher": "",
+      "weekly_sessions": 2,
+      "textbook": "",
+      "regulations": [],
+      "skeleton_source": "textbook"
+    },
+    {
+      "id": "DEMO-B",
+      "name": "示例课程乙",
+      "teacher": "",
+      "weekly_sessions": 2,
+      "textbook": "",
+      "regulations": [
+        "GB 50016"
+      ],
+      "skeleton_source": "regulation"
+    }
+  ]
+}
