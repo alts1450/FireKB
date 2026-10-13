@@ -234,7 +234,14 @@ def main() -> int:
         _pub = _pub_path.read_text(encoding="utf-8")
         check("公开 README 带版本提示", fk.__version_display__ in _pub and fk.__version__ in _pub)
         check("公开 README 告知这是测试版", "测试版" in _pub)
-        check("公开 README 告知可能有破坏兼容的更新", "破坏兼容" in _pub)
+        # 兼容性告知按**语义**判，不钉死某一句措辞：0.1α 写的是"破坏兼容"，
+        # 0.2-latest 写的是"不承诺后续版本向后兼容" —— 意思相同，钉字面只会误报
+        # （实测误报过一次，把一次本该通过的发布拦了下来）。
+        _compat = any(w in _pub for w in (
+            "破坏兼容", "不承诺向后兼容", "不承诺后续版本向后兼容",
+            "不保证向后兼容", "不保证兼容"
+        ))
+        check("公开 README 告知可能不向后兼容", _compat)
 
     print("\n" + "=" * 84)
     print("通过 %d 项，失败 %d 项" % (len(PASS), len(FAIL)))
