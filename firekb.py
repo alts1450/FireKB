@@ -43,15 +43,15 @@ if str(TOOLS) not in sys.path:
 # ---------------------------------------------------------------------------
 # 为什么同时有"机器版"和"显示版"：
 #   · `__version__` 给**工具**吃（打包、依赖声明、CI、比大小）——
-#     这类场合要 ASCII、且能被 PEP 440 / semver 解析，所以写 `0.1.0-alpha`；
-#   · `__version_display__` 给人看，用 `0.1α`。
+#     这类场合要 ASCII、且能被 PEP 440 / semver 解析，所以写 `0.2.0`；
+#   · `__version_display__` 给人看，用 `0.2-latest`。
 #   两者语义相同、受众不同；只留一个总有一侧别扭。
-__version__ = "0.1.0-alpha"
-__version_display__ = "0.1α"
+__version__ = "0.2.0"
+__version_display__ = "0.2-latest"
 
 # 发布状态：本版本**明确为测试版**，且**不承诺向后兼容**。
 # 这不是客套话，是当前的工程事实 —— 配置格式、产物契约、CLI 参数都还可能变。
-__release_status__ = "alpha"
+__release_status__ = "latest"
 __compat_policy__ = "no-backward-compatibility-guarantee"
 
 import kb  # noqa: E402  共享层（路径常量 / 运行日志）
@@ -97,6 +97,7 @@ DOCTOR_SOFT: set[str] = {"engines"}
 SELFTEST_FILES: list[str] = [
     "selftest/test_kb.py",
     "selftest/test_engines.py",
+    "selftest/test_deployment.py",
 ]
 
 

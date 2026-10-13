@@ -87,6 +87,9 @@ DATA_GLOBS = [
 # ---- 永不推送（任何情况下都跳过）----
 NEVER = [
     "00_配置/.env",
+    "00_配置/.egress-consent.json",
+    "00_配置/.deployment.json",
+    ".firekb-runtime/**",
     "20_文本库/transcript.jsonl",   # 目标端独有（转写结果），反向也不动
     "90_日志/*",
     # 断点续跑状态：**各机各跑各的环节**，状态文件只对产生它的那台机器有意义。

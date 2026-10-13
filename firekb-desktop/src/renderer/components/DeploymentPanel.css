@@ -1,0 +1,30 @@
+.deployment-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.deployment-heading .btn { flex-shrink: 0; }
+.device-facts { display: grid; grid-template-columns: 2fr 2fr 1fr 1fr; gap: 18px; border-bottom: 1px solid var(--line); padding: 5px 0 22px; }
+.device-facts dt { color: var(--text-tertiary); font-size: 10px; margin-bottom: 7px; }
+.device-facts dd { font-size: 12px; color: var(--text-primary); overflow-wrap: anywhere; }
+.device-facts small { display: block; font-size: 10px; color: var(--text-secondary); margin-top: 5px; }
+.deployment-tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 22px 0 16px; }
+.deployment-tier { position: relative; display: flex; flex-direction: column; padding: 17px; border: 1px solid var(--line); border-radius: 12px; cursor: pointer; transition: border-color 180ms, background 180ms; }
+.deployment-tier.selected { background: var(--accent-muted); border-color: var(--accent-line); }
+.deployment-tier input { position: absolute; top: 20px; right: 14px; accent-color: var(--accent); }
+.tier-title { font-size: 12px; font-weight: 600; margin-bottom: 12px; }
+.tier-model { font-size: 13px; font-weight: 500; }
+.tier-meta { font-size: 10px; color: var(--text-tertiary); margin: 4px 0 12px; }
+.tier-route { color: var(--text-secondary); font-size: 10px; }
+.tier-route.local { color: var(--success); }
+.deployment-detail { font-size: 12px; line-height: 1.8; }
+.deployment-reasons { padding-left: 17px; margin: 10px 0; color: var(--text-secondary); font-size: 11px; }
+.deployment-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 17px; }
+.deployment-commands { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 11px; }
+.deployment-commands summary { cursor: pointer; color: var(--text-secondary); }
+.deployment-commands pre, .deployment-progress pre { padding: 12px; margin-top: 10px; border-radius: 8px; background: var(--surface-2); font-family: var(--font-mono); font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.deployment-progress { margin-top: 20px; font-size: 12px; }
+.deployment-progress pre { max-height: 180px; overflow-y: auto; }
+.consent-recipient { font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere; margin-bottom: 12px; }
+.consent-categories { display: grid; grid-template-columns: 1fr 1fr; border: 0; gap: 10px 18px; margin: 14px 0 18px; }
+.consent-categories legend { font-size: 10px; color: var(--text-tertiary); margin-bottom: 10px; }
+.consent-categories label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.consent-categories input { accent-color: var(--accent); }
+.consent-categories span { font-size: 10px; color: var(--success); }
+@media (max-width: 1050px) { .device-facts { grid-template-columns: 1fr 1fr; } .deployment-heading { flex-wrap: wrap; } .deployment-tier { padding: 12px; } .deployment-tier input { top: 15px; right: 10px; } }

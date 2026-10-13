@@ -1,0 +1,19 @@
+.process-control { display: grid; grid-template-columns: minmax(290px, .95fr) minmax(0, 1.25fr); gap: 24px; min-height: 480px; }
+.steps-panel, .logs-panel { border: 1px solid var(--line); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; min-width: 0; background: var(--surface-1); }
+.panel-title { font-size: 14px; font-weight: 600; margin-bottom: 5px; }
+.panel-subtitle { font-size: 12px; color: var(--text-tertiary); margin-bottom: 24px; }
+.steps-list { display: flex; flex-direction: column; gap: 10px; }
+.step-card { display: flex; align-items: center; gap: 15px; border: 1px solid var(--line); border-radius: 13px; padding: 15px; transition: border-color 200ms, background 200ms; }
+.step-card:hover { background: var(--surface-2); border-color: var(--surface-4); }
+.step-content { flex: 1; min-width: 0; }
+.step-title { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.step-description { font-size: 11px; color: var(--text-tertiary); }
+.step-card .btn { flex-shrink: 0; padding: 7px 14px; font-size: 11px; }
+.logs-panel { min-height: 400px; }
+.logs-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.logs-content { flex: 1; min-height: 240px; max-height: 520px; border: 1px solid var(--line); background: var(--surface-2); border-radius: 12px; padding: 18px; overflow-y: auto; font: 11px/1.9 var(--font-mono); }
+.logs-empty { color: var(--text-tertiary); text-align: center; padding: 70px 0; }
+.log-entry { color: var(--text-secondary); margin-bottom: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-entry.log-success { color: var(--success); }
+.log-entry.log-error { color: var(--error); }
+@media (max-width: 1120px) { .process-control { grid-template-columns: minmax(0, 1fr); } }

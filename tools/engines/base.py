@@ -43,6 +43,7 @@ class EngineSpec:
     needs_gpu: bool = False        # 是否必须 GPU（False = 有则用、无则降级）
     needs_network: bool = False    # 是否必须联网
     needs_api_key: tuple = ()      # 需要哪些密钥（从 00_配置/.env 读）
+    recipient: str = ""            # 云端接收方；变更后已有授权失效
     egress: str = "none"           # 数据出境级别，见 egress.py
     note: str = ""                 # 许可/来源等提示，会打印给用户
 

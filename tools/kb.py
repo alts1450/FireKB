@@ -1012,7 +1012,7 @@ def _llm_module():
 
 def ask_json(prompt: str, system: str | None = None, retries: int = 3,
              max_tokens: int = 8000, model: str | None = None,
-             temperature: float = 0.2, verbose: bool = False):
+             temperature: float = 0.2, verbose: bool = False, data_category: str = "personal"):
     """
     调用模型并要求返回 JSON。内置：重试、JSON 容错、token 统计。
     失败抛 RuntimeError（调用方决定是跳过还是中断）。
@@ -1027,12 +1027,14 @@ def ask_json(prompt: str, system: str | None = None, retries: int = 3,
     for attempt in range(1, retries + 1):
         try:
             res = llm.chat(msgs, model=model, json_mode=True, max_tokens=max_tokens,
-                           temperature=temperature, disable_thinking=True, verbose=verbose)
+                           temperature=temperature, disable_thinking=True, verbose=verbose, data_category=data_category)
             usage = res.get("usage") or {}
             _cost["prompt_tokens"] += usage.get("prompt_tokens", 0)
             _cost["completion_tokens"] += usage.get("completion_tokens", 0)
             _cost["calls"] += 1
             return llm.extract_json(res.get("content", ""))
+        except PermissionError:
+            raise
         except Exception as exc:
             last_err = exc
             if attempt < retries:
@@ -1042,14 +1044,14 @@ def ask_json(prompt: str, system: str | None = None, retries: int = 3,
 
 
 def ask_text(prompt: str, system: str | None = None, max_tokens: int = 8000,
-             model: str | None = None, temperature: float = 0.3) -> str:
+             model: str | None = None, temperature: float = 0.3, data_category: str = "personal") -> str:
     llm = _llm_module()
     msgs = []
     if system:
         msgs.append({"role": "system", "content": system})
     msgs.append({"role": "user", "content": prompt})
     res = llm.chat(msgs, model=model, max_tokens=max_tokens,
-                   temperature=temperature, disable_thinking=True)
+                   temperature=temperature, disable_thinking=True, data_category=data_category)
     usage = res.get("usage") or {}
     _cost["prompt_tokens"] += usage.get("prompt_tokens", 0)
     _cost["completion_tokens"] += usage.get("completion_tokens", 0)

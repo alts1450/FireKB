@@ -1,0 +1,11 @@
+.header { background: var(--surface-0); padding: 46px clamp(24px, 4vw, 56px) 25px; -webkit-app-region: drag; }
+.header-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; gap: 12px; font-size: 10px; }
+.breadcrumb { color: var(--text-tertiary); }
+.breadcrumb span { margin: 0 9px; color: var(--surface-4); }
+.breadcrumb strong { color: var(--text-secondary); font-weight: 400; }
+.header-status { display: flex; align-items: center; gap: 6px; color: var(--text-tertiary); font-size: 10px; -webkit-app-region: no-drag; }
+.header-title { font-size: 20px; font-weight: 600; letter-spacing: -.4px; line-height: 1.4; color: var(--text-primary); -webkit-app-region: no-drag; }
+.header-subtitle { margin-top: 7px; font-size: 11px; color: var(--text-tertiary); -webkit-app-region: no-drag; }
+.header-compact { padding-bottom: 0; }
+.header-compact .header-top { justify-content: flex-end; margin-bottom: 0; }
+@media (max-width: 740px) { .header { padding-inline: 20px; } }

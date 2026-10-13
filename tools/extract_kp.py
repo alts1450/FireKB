@@ -443,7 +443,7 @@ def extract_chunk(chunk: dict, course_id: str, start_index: int, verbose: bool =
     # 知识点最多的块最容易被吃掉预算。抬高上限不产生额外费用（按实际用量计费），
     # 只有真正写满时才多花。模块级设计意图是配合 disable_thinking 使用（见文件开头文档字符串）；
     # 该开关当前**未启用**，以保持全库抽取口径一致。
-    data = kb.ask_json(prompt, system=SYSTEM_PROMPT, max_tokens=16000,
+    data = kb.ask_json(prompt, data_category="page_text", system=SYSTEM_PROMPT, max_tokens=16000,
                        temperature=0.2, verbose=verbose)
     items = data.get("knowledge_points") or data.get("knowledgePoints") or []
     if not isinstance(items, list):

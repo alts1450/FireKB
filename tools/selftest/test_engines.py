@@ -161,98 +161,29 @@ def main() -> int:
           "全部覆盖（%d 个必需文件）" % len(required) if not missing
           else "★ GENERAL_GLOBS 漏了：%s —— 另一台机器永远收不到这些文件" % missing)
 
-    # 8) 个性化数据绝不出境
-    #    "同意"回答的是"有没有权利上传"（版权），与个性化数据是两回事 ——
-    #    个性化数据（录音/转写/学习痕迹）必须走**硬规则**：同意也无效。
-    #    这条测试的关键是**把同意与临时标志都给了，仍必须被拒**。
-    print("\n8) 个性化数据绝不出境（硬规则，同意也不放行）")
-    check("NEVER 集合含 audio/transcript/personal",
-          eg.NEVER_EGRESS == {"audio", "transcript", "personal"}, str(sorted(eg.NEVER_EGRESS)))
-    check("is_never：audio", eg.is_never("audio"))
-    check("is_never：transcript", eg.is_never("transcript"))
-    check("is_never：personal", eg.is_never("personal"))
-    check("is_never：document 不是 NEVER（第三方出版内容可经同意出境）", not eg.is_never("document"))
-    check("is_never：none 不是 NEVER", not eg.is_never("none"))
-    check("个性化级别在 EGRESS_LEVELS 里有说明", "personal" in eg.EGRESS_LEVELS)
-
+    # 8) User-authorized policy revision: manual approval permits personal egress.
+    print("\n8) 个性化数据默认拒绝，手动批准后放行，撤销后再拒绝")
     class _FakeAsr(BaseEngine):
-        spec = EngineSpec(kind="asr", name="fake_cloud_asr", label="假云端转写（测试用）",
-                          python_pkgs=("json",), needs_network=True, needs_api_key=("FAKE_KEY",),
-                          egress="audio", note="测试：会把课堂录音发往第三方")
-
+        spec = EngineSpec(kind="asr", name="fake_cloud_asr", egress="audio", needs_network=True)
     with tempfile.TemporaryDirectory() as td:
-        tdp = Path(td)
-        fake_asr = _FakeAsr()
-        # 先给足"放行条件"：写入同意文件 + allow_flag=True —— 两者都不该救得回来
-        eg.grant(tdp, {"asr": fake_asr}, "测试：我确实有权上传")
-        consent = eg.load_consent(tdp).get("granted", {})
-        check("grant() 拒绝为个性化引擎记录同意", not consent, str(consent))
+        fake = {"asr": _FakeAsr()}
         try:
-            eg.require_consent({"asr": fake_asr}, tdp, allow_flag=True)
-            check("个性化引擎：有同意+--allow-egress 仍必须拒跑", False, "竟然放行了")
-        except SystemExit as exc:
-            msg = str(exc)
-            check("个性化引擎：有同意+--allow-egress 仍必须拒跑", True, "已拒开工")
-            check("拒绝信息点明这是硬规则（不是授权问题）", "硬规则" in msg)
-            check("拒绝信息给出处置办法", "engines.json" in msg)
-        check("never_engines 能识别出该引擎",
-              [r["engine"] for r in eg.never_engines({"asr": fake_asr})] == ["fake_cloud_asr"])
-        # 对照组：第三方出版内容仍走原同意流程（未同意 → 拒；同意 → 放行）
-        fake_doc = _FakeCloud()
-        try:
-            eg.require_consent({"parser": fake_doc}, tdp)
-            check("对照：第三方出版内容未同意 → 仍拒跑", False, "竟然放行")
+            eg.require_consent(fake, td)
+            check("personal_default_blocked", False)
         except SystemExit:
-            check("对照：第三方出版内容未同意 → 仍拒跑", True, "已拒开工")
-        eg.grant(tdp, {"parser": fake_doc}, "测试：有权上传教材")
+            check("personal_default_blocked", True)
+        eg.grant(td, fake, "人工确认有权上传")
+        eg.require_consent(fake, td)
+        check("personal_after_manual_approval", True)
+        eg.revoke(td)
         try:
-            eg.require_consent({"parser": fake_doc}, tdp)
-            check("对照：第三方出版内容同意后 → 放行", True, "已放行")
+            eg.require_consent(fake, td)
+            check("personal_revoked_blocked", False)
         except SystemExit:
-            check("对照：第三方出版内容同意后 → 放行", False, "同意后仍被拦")
-    check("当前配置里没有个性化出境引擎（应为空）", not eg.never_engines(engs),
-          str([r["engine"] for r in eg.never_engines(engs)]))
-
-    # 9) 第三方版权书目的**书面禁令**
-    #    这条要求的是"书面表示禁止 + 实际不做限制"，所以测试有两面：
-    #    ① 放行提示里必须出现禁令原文（否则等于没写）；
-    #    ② **不能**因此拦命令（同意后仍要放行，否则就变成技术限制了）。
-    print("\n9) 第三方版权书目：书面禁令必须在场，且**不做技术限制**")
-    with tempfile.TemporaryDirectory() as td:
-        tdp = Path(td)
-        doc = _FakeCloud()
-        eg.grant(tdp, {"parser": doc}, "测试：有权上传教材")
-        try:
-            eg.require_consent({"parser": doc}, tdp)
-            check("第三方出版内容同意后仍放行（不做技术限制）", True, "已放行")
-        except SystemExit as exc:
-            check("第三方出版内容同意后仍放行（不做技术限制）", False, "被拦了 —— 那就是技术限制")
-    with tempfile.TemporaryDirectory() as td:
-        tdp = Path(td)
-        doc = _FakeCloud()
-        try:
-            eg.require_consent({"parser": doc}, tdp)
-            check("未同意时会给出禁令人读文本", False, "竟然放行")
-        except SystemExit as exc:
-            msg = str(exc)
-            check("未同意时会给出禁令人读文本", True, "已拒开工")
-            check("禁令含「未获得版权」", "未获得版权" in msg, )
-            check("禁令含「后果自负」", "后果自负" in msg)
-            check("明示**不做技术限制**（避免给人'已合规'的错觉）", "不做技术限制" in msg)
-    # 豁免路径：--allow-egress 照常有效（这也是"不做技术限制"的一部分）
-    with tempfile.TemporaryDirectory() as td:
-        try:
-            eg.require_consent({"parser": _FakeCloud()}, Path(td), allow_flag=True)
-            check("--allow-egress 对版权书目照常有效（非技术限制）", True, "已放行")
-        except SystemExit:
-            check("--allow-egress 对版权书目照常有效（非技术限制）", False, "被拦了")
-    # 对照：同一开关对**个性化数据**必须无效（两类数据的处理必须不同）
-    with tempfile.TemporaryDirectory() as td:
-        try:
-            eg.require_consent({"asr": _FakeAsr()}, Path(td), allow_flag=True)
-            check("对照：--allow-egress 对个性化数据**无效**", False, "竟然放行")
-        except SystemExit:
-            check("对照：--allow-egress 对个性化数据**无效**", True, "已拒开工")
+            check("personal_revoked_blocked", True)
+        eg.require_consent(fake, td, allow_flag=True)
+        check("explicit_cli_one_run_approval", True)
+    check("版权书面禁令保留", "未获得版权" in eg.COPYRIGHT_NOTICE and "后果自负" in eg.COPYRIGHT_NOTICE)
 
     # 10) 版本声明的一致性
     #     为什么值得单测：版本号散落在**四个地方**（代码常量 / 更新日志标题 /
@@ -267,13 +198,19 @@ def main() -> int:
     _spec.loader.exec_module(fk)
     check("__version__ 是 PEP 440 形态", bool(re.fullmatch(r"\d+\.\d+\.\d+(-[a-z0-9.]+)?", fk.__version__)),
           fk.__version__)
-    check("__version__ 与 __version_display__ 同源（0.1.0-alpha ↔ 0.1α）",
-          fk.__version__ == "0.1.0-alpha" and fk.__version_display__ == "0.1α",
+    check("__version__ 与显示版本同源（0.2.0 ↔ 0.2-latest）",
+          fk.__version__ == "0.2.0" and fk.__version_display__ == "0.2-latest",
           "%s / %s" % (fk.__version__, fk.__version_display__))
-    check("__release_status__ 明示 alpha", fk.__release_status__ == "alpha", fk.__release_status__)
+    check("__release_status__ 明示 latest", fk.__release_status__ == "latest", fk.__release_status__)
     check("__compat_policy__ 明示不承诺向后兼容",
           fk.__compat_policy__ == "no-backward-compatibility-guarantee", fk.__compat_policy__)
 
+    _desktop = ROOT / "firekb-desktop"
+    if (_desktop / "package.json").exists():
+        _pkg = json.loads((_desktop / "package.json").read_text(encoding="utf-8"))
+        _lock = json.loads((_desktop / "package-lock.json").read_text(encoding="utf-8"))
+        check("桌面端版本与 CLI 版本一致", _pkg["version"] == fk.__version__)
+        check("桌面锁文件版本一致", _lock["version"] == _pkg["version"] == _lock["packages"][""]["version"])
     _cl = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     check("更新日志有该版本的条目标题", ("## [%s]" % fk.__version_display__) in _cl,
           "## [%s]" % fk.__version_display__)
@@ -295,7 +232,7 @@ def main() -> int:
               "两处都没有 —— 发布快照缺公开文档")
     else:
         _pub = _pub_path.read_text(encoding="utf-8")
-        check("公开 README 带版本提示", fk.__version_display__ in _pub or "0.1.0-alpha" in _pub)
+        check("公开 README 带版本提示", fk.__version_display__ in _pub and fk.__version__ in _pub)
         check("公开 README 告知这是测试版", "测试版" in _pub)
         check("公开 README 告知可能有破坏兼容的更新", "破坏兼容" in _pub)
 

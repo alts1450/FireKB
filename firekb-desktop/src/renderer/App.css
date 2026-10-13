@@ -1,0 +1,9 @@
+.app { display: grid; grid-template-columns: 216px minmax(0, 1fr); width: 100%; height: 100%; background: var(--surface-0); }
+.main-content { display: flex; flex-direction: column; min-width: 0; height: 100%; overflow: hidden; }
+.content-area { flex: 1; min-height: 0; overflow-y: auto; padding: 0 clamp(24px, 4vw, 56px) 28px; scroll-behavior: smooth; }
+.content-area-input { padding-bottom: 18px; }
+.view-panel:not([hidden]) { min-height: 100%; animation: viewEnter 260ms var(--ease-glass) both; }
+.view-panel[hidden] { display: none; }
+@keyframes viewEnter { from { opacity: 0; transform: translateX(6px); } to { opacity: 1; transform: translateX(0); } }
+@media (max-width: 1050px) { .app { grid-template-columns: 198px minmax(0, 1fr); } }
+@media (max-width: 740px) { .app { grid-template-columns: 180px minmax(0, 1fr); } .content-area { padding: 0 20px 20px; } }

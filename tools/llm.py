@@ -31,7 +31,9 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from engines import egress as eg
 from pathlib import Path
 
 ROOT = Path(os.environ.get("FIREKB_ROOT") or Path(__file__).resolve().parents[1])
@@ -58,7 +60,7 @@ def load_env(path: Path = ENV_FILE) -> dict[str, str]:
                 continue
             k, v = line.split("=", 1)
             cfg[k.strip()] = v.strip().strip('"').strip("'")
-    for k in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"):
+    for k in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "DEEPSEEK_MODEL_STRONG", "FIREKB_PROVIDER", "FIREKB_LOCAL_CONTEXT"):
         if os.environ.get(k):
             cfg[k] = os.environ[k]
     return cfg
@@ -66,6 +68,8 @@ def load_env(path: Path = ENV_FILE) -> dict[str, str]:
 
 def has_valid_key(cfg: dict[str, str] | None = None) -> bool:
     cfg = cfg or load_env()
+    if eg.is_local_recipient(cfg.get("DEEPSEEK_BASE_URL") or DEFAULT_BASE):
+        return True
     key = (cfg.get("DEEPSEEK_API_KEY") or "").strip()
     if not key:
         return False
@@ -135,6 +139,8 @@ def chat(
     retries: int = 3,
     disable_thinking: bool = False,
     verbose: bool = False,
+    data_category: str = "personal",
+    purpose: str = "firekb_knowledge_processing",
 ) -> dict:
     """
     调用兼容 OpenAI 协议的服务，返回 {"content", "usage", "model", "finish_reason"}。
@@ -147,7 +153,17 @@ def chat(
             f"未配置可用的 API Key。请编辑 {ENV_FILE}，把 DEEPSEEK_API_KEY 填成真实值。\n"
             f'当前值：{"(空)" if not key else key[:8] + "..."}'
         )
-    base = (cfg.get("DEEPSEEK_BASE_URL") or DEFAULT_BASE).rstrip("/")
+    base = eg.normalize_recipient(cfg.get("DEEPSEEK_BASE_URL") or DEFAULT_BASE)
+    local = eg.is_local_recipient(base)
+    # Checked before request construction/retries. No automatic cloud fallback.
+    eg.require_recipient(ROOT / "00_配置", data_category, base, purpose)
+    if local:
+        key = "ollama"
+        context = int(cfg.get("FIREKB_LOCAL_CONTEXT") or 4096)
+        max_tokens = min(max_tokens, max(256, context // 4))
+        # Conservative text guard; never truncate evidence to fit a local model.
+        if sum(len(str(m.get("content", ""))) for m in messages) > context - max_tokens - 256:
+            raise RuntimeError("材料超过本地保守上下文预算；请缩小分块或手动配置并批准云端接口")
     model = model or cfg.get("DEEPSEEK_MODEL") or DEFAULT_MODEL
     url = f"{base}/chat/completions"
 
@@ -159,14 +175,22 @@ def chat(
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    if disable_thinking:
+    provider = cfg.get("FIREKB_PROVIDER") or ("deepseek" if urllib.parse.urlsplit(base).hostname == "api.deepseek.com" else "custom")
+    if disable_thinking and provider == "deepseek":
         # DeepSeek 思考模式开关；关闭后更快更省，适合批量结构化任务
         payload["thinking"] = {"type": "disabled"}
 
+    if local and provider == "ollama":
+        payload["reasoning_effort"] = "none"
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise PermissionError("推理接口重定向未获批准，拒绝继续")
+    opener = urllib.request.build_opener(NoRedirect(), *([urllib.request.ProxyHandler({})] if local else []))
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     last_err: Exception | None = None
 
     for attempt in range(1, retries + 1):
+        eg.require_recipient(ROOT / "00_配置", data_category, base, purpose)
         req = urllib.request.Request(
             url,
             data=body,
@@ -180,7 +204,7 @@ def chat(
         try:
             if verbose:
                 print(f"    [llm] attempt {attempt} -> {url} model={model}")
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8")
             data = json.loads(raw)
             choice = (data.get("choices") or [{}])[0]
@@ -200,6 +224,8 @@ def chat(
                 "model": data.get("model", model),
                 "finish_reason": finish,
             }
+        except PermissionError:
+            raise
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
@@ -245,7 +271,7 @@ def selftest() -> int:
 
     print("\n正在发起一次最小测试调用 ...")
     try:
-        out = ask("只回答两个字：就绪", max_tokens=200, temperature=0, disable_thinking=True)
+        out = ask("只回答两个字：就绪", max_tokens=200, temperature=0, disable_thinking=True, data_category="none")
         print(f"[OK] 调用成功，模型返回：{out.strip()[:50]}")
     except Exception as exc:
         print(f"[FAIL] {exc}")
@@ -259,6 +285,7 @@ def selftest() -> int:
             max_tokens=300,
             temperature=0,
             disable_thinking=True,
+            data_category="none",
         )
         print(f"[OK] JSON 模式返回：{extract_json(out)}")
     except Exception as exc:

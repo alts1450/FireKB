@@ -327,7 +327,7 @@ def review_course(course: str, info: dict, by_page: dict, args) -> dict:
             prompt = build_prompt(course, book, info, books[book], bt)
             print(f"\n   复核《{short_book(book)}》{len(bt)} 个候选（prompt {len(prompt)} 字符）...")
             try:
-                res = kb.ask_json(prompt, system=SYSTEM_PROMPT, max_tokens=8000,
+                res = kb.ask_json(prompt, data_category="page_text", system=SYSTEM_PROMPT, max_tokens=8000,
                                   temperature=0.1, verbose=args.verbose)
                 items = res.get("items") or []
                 ai_items.extend(items)

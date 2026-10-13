@@ -9,6 +9,8 @@
 # ---------- 密钥与凭据（永不入库）----------
 00_配置/.env
 00_配置/.egress-consent.json
+00_配置/.deployment.json
+.firekb-runtime/
 *.credentials.yaml
 *.key
 *.pem
