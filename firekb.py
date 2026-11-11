@@ -38,26 +38,15 @@ TOOLS = ROOT / "tools"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
-# ---------------------------------------------------------------------------
-# 版本与发布状态（**单一来源**：别处要版本就从这里引用，不要再写一份）
-# ---------------------------------------------------------------------------
-# 为什么同时有"机器版"和"显示版"：
-#   · `__version__` 给**工具**吃（打包、依赖声明、CI、比大小）——
-#     这类场合要 ASCII、且能被 PEP 440 / semver 解析，所以写 `0.2.0`；
-#   · `__version_display__` 给人看，用 `0.2-latest`。
-#   两者语义相同、受众不同；只留一个总有一侧别扭。
-__version__ = "0.2.0"
-__version_display__ = "0.2-latest"
-
-# 发布状态：本版本**明确为测试版**，且**不承诺向后兼容**。
-# 这不是客套话，是当前的工程事实 —— 配置格式、产物契约、CLI 参数都还可能变。
-__release_status__ = "latest"
-__compat_policy__ = "no-backward-compatibility-guarantee"
+__version__ = "1.0.0"
+__version_display__ = __version__
+__release_status__ = "release"
 
 import kb  # noqa: E402  共享层（路径常量 / 运行日志）
 
 # stage -> (模块名, 一句话说明)。模块名 None = 由本入口自己实现的元环节。
 STAGES: dict[str, tuple[str | None, str]] = {
+    "maintenance": ("maintenance",     "备份清单校验、恢复与环境基线"),
     "init":        ("init_project",    "首次初始化：建目录 + 从模板生成配置（幂等，不覆盖）"),
     "parse":       ("parse_docs",      "M1 解析：PDF/PPTX/EPUB → 页级文本"),
     "ocr":         ("ocr_pages",       "M2 扫描页 OCR（无文字层的影印页）"),
@@ -70,6 +59,10 @@ STAGES: dict[str, tuple[str | None, str]] = {
     "offsets":     ("page_offsets",    "页码双轨：探测/登记 印刷页 ↔ PDF 物理页 偏移"),
     "dedupe":      ("dedupe_sources",  "按 references.json 声明清理重复来源（--apply --yes 才写盘）"),
     "review":      ("make_review",     "M6 复习产物（卡片/背诵单/思维导图）"),
+    "export":      ("export_course",   "课程阅读版 / Markdown / PDF 导出"),
+    "quality":     ("quality_check",   "课程分层抽样与 AI 内容复核（独立于人审）"),
+    "ai-review":   ("ai_review",       "联网 AI 自查待验清单，证据评分>=80%且关键检查通过后放行"),
+    "acceptance":  ("acceptance",      "真实课程全流程验收与报告"),
     "pipeline":    ("pipeline",        "整条流水线编排（按顺序调上面各步）"),
     "status":      ("status",          "状态汇总"),
     "consistency": ("consistency",     "配置一致性：课表 × 骨架 × 素材 × 产物"),
@@ -98,11 +91,12 @@ SELFTEST_FILES: list[str] = [
     "selftest/test_kb.py",
     "selftest/test_engines.py",
     "selftest/test_deployment.py",
+    "selftest/test_workflows.py",
 ]
 
 
 def _print_stages() -> None:
-    print(f"FireKB {__version_display__}（测试版 · 不承诺向后兼容）")
+    print(f"FireKB {__version_display__}")
     print("统一入口 —— 可用环节：\n")
     print(f"  {'环节':<14}{'说明'}")
     print("  " + "-" * 68)
@@ -223,7 +217,7 @@ def _dispatch(stage: str, rest: list[str]) -> int:
 
 
 def _doctor() -> int:
-    print(f"\nFireKB {__version_display__}（测试版 · 不承诺向后兼容）")
+    print(f"\nFireKB {__version_display__}")
     results: list[tuple[str, int]] = []
     for stage in DOCTOR:
         print("\n" + "#" * 78)
@@ -282,8 +276,6 @@ def main(argv: list[str] | None = None) -> int:
         # 同时给出机器版与显示版：脚本读第一行、人看第二行都方便
         print(__version__)
         print(f"FireKB {__version_display__}（{__release_status__}）")
-        print("发布状态：测试版 —— 仍在演进，**后续版本可能包含破坏兼容性的改动**")
-        print("兼容性承诺：无（配置格式 / 产物契约 / CLI 参数 / 目录结构都可能变）")
         print(f"项目根：{ROOT}")
         return 0
 
@@ -302,6 +294,13 @@ def main(argv: list[str] | None = None) -> int:
     if stage == "runs":
         return _tail_runs(args.tail, args.stage_filter)
 
+    if stage in {"parse", "ocr", "transcribe", "skeleton", "review-skel", "extract", "verify", "queue", "review", "export", "quality", "ai-review", "acceptance", "pipeline", "dedupe", "offsets", "init", "maintenance"}:
+        try:
+            with kb.writer_lock():
+                return _dispatch(stage, rest)
+        except (RuntimeError, ValueError) as exc:
+            print(f"[STOP] {exc}", file=sys.stderr)
+            return 3
     return _dispatch(stage, rest)
 
 

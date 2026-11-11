@@ -500,6 +500,55 @@ def build_course(course: str, pages: list[dict]) -> dict:
     }
 
 
+def build_course_files(course: str, pages: list[dict]) -> dict:
+    """Each source owns its chapter/section page space."""
+    from collections import defaultdict
+    by_file = defaultdict(list)
+    for page in pages:
+        if page.get('source_kind') == 'docx':
+            continue
+        by_file[page['source_file']].append(page)
+    chapters = []
+    for sf, source_pages in sorted(by_file.items()):
+        info = build_course(course, source_pages)
+        found = info['chapters']
+        if Path(sf).suffix.lower() == '.pptx':
+            # Lecture slide decks are an explicit curriculum chapter, not book headers.
+            found = [{'num':1,'title':Path(sf).stem,'page_start':1,'page_end':max(p['page_no'] for p in source_pages),'kind':'body','sections':[]}]
+        if not found:
+            found = [{'num':1,'title':Path(sf).stem,'page_start':1,'page_end':max(p['page_no'] for p in source_pages),'kind':'body','sections':[]}]
+        for i,ch in enumerate(found,1):
+            ch['source_file'] = sf
+            ch['file_scoped'] = True
+            ch['node_id'] = f"{course}::{kb.make_file_tag(source_pages[0].get('file_id'))}::ch{i:02d}"
+            ch['kind'] = classify_kind(ch['title'])
+            for j,section in enumerate(ch.get('sections',[]),1):
+                section['source_file'] = sf
+                section['node_id'] = f"{ch['node_id']}::s{j:02d}"
+            chapters.append(ch)
+    return {'course':course,'chapters':chapters,'pages':len(pages),'usable_pages':sum(bool(p.get('text','').strip()) for p in pages),'file_scoped':True,'method':'per_source','chapter_count':len(chapters),'section_count':sum(len(c.get('sections',[])) for c in chapters)}
+
+
+def append_new_sources(course, pages, previous):
+    """Preserve reviewed chapter boundaries; append only previously unseen sources."""
+    import copy
+    old = copy.deepcopy(previous)
+    known = {c.get('source_file') for c in old.get('chapters', [])} - {None}
+    known.update(old.get('legacy_source_files', []))
+    if old.get('chapters') and not known:
+        raise ValueError('已有骨架缺少文件归属，请先补录 legacy_source_files 或显式重建，避免覆盖已审核边界')
+    fresh = [p for p in pages if p.get('source_file') not in known and p.get('source_kind') != 'docx']
+    if not fresh:
+        return old, False
+    built = build_course_files(course, fresh)
+    old.setdefault('chapters', []).extend(built['chapters'])
+    old['chapter_count'] = len(old['chapters'])
+    old['section_count'] = sum(len(ch.get('sections', [])) for ch in old['chapters'])
+    old['pages'] = len(pages)
+    old['usable_pages'] = sum(bool(p.get('text','').strip()) for p in pages)
+    return old, True
+
+
 def reclassify_appendix(dry_run: bool = False) -> int:
     """
     迁移：把**已存在骨架**里被判成 matter 的附录/附表章改判为 appendix。
@@ -559,10 +608,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="构建知识骨架（教材章节结构）")
     ap.add_argument("--course", help="只处理某门课")
     ap.add_argument("--show", action="store_true", help="只显示结果，不重写 skeleton.json")
+    ap.add_argument('--append-new', action='store_true', help='保留已有章节，只为新文件追加骨架')
     ap.add_argument("--reclassify-appendix", action="store_true",
                     help="把已有骨架里 matter 的附录/附表章改判为 appendix（不重建骨架）")
     ap.add_argument("--dry-run", action="store_true", help="配合 --reclassify-appendix：只显示不改")
     args = ap.parse_args()
+    args.course = kb.resolve_course(args.course)
 
     if args.reclassify_appendix:
         return reclassify_appendix(dry_run=args.dry_run)
@@ -587,12 +638,19 @@ def main() -> int:
         "source": "教材/课件章节结构识别",
         "courses": {},
     }
+    existing = kb.load_json(SKELETON_FILE, {})
+    touched = False
 
     for course, pages in sorted(groups.items()):
-        if args.course and args.course not in course:
+        if args.course and args.course != course:
             continue
         cfg = match_course(course) or {}
-        info = build_course(course, pages)
+        if args.append_new and course in existing.get('courses', {}):
+            info, changed = append_new_sources(course, pages, existing['courses'][course])
+            touched |= changed
+        else:
+            info = build_course_files(course, pages)
+            touched = True
         info["course_id"] = cfg.get("id", "")
         result["courses"][course] = info
 
@@ -621,10 +679,18 @@ def main() -> int:
             print(f"    - {m}")
 
     if not args.show:
+        if args.append_new and not touched:
+            print('已有骨架已包含全部来源，未写入文件。')
+            return 0
         KP_DIR.mkdir(parents=True, exist_ok=True)
         import json
-        SKELETON_FILE.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        previous = kb.load_json(SKELETON_FILE, {})
+        if args.course:
+            previous.setdefault('courses', {}).update(result['courses'])
+            previous['generated_at'] = result['generated_at']
+            result = previous
+        kb.backup_files([SKELETON_FILE], 'skeleton')
+        kb.write_json(SKELETON_FILE, result)
         print(f"\n骨架已写入：{SKELETON_FILE}")
     else:
         print("\n（--show 模式，未写入文件）")
@@ -634,4 +700,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    with kb.writer_lock():
+        sys.exit(main())

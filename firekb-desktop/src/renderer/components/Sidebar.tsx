@@ -17,7 +17,9 @@ interface SidebarProps {
   appearance: AppearanceControlsProps
 }
 const menuItems: { id: View; icon: IconName; label: string }[] = [
+  { id: 'chat', icon: 'book', label: '知识对话' },
   { id: 'input', icon: 'folder', label: '素材输入' },
+  { id: 'timetable', icon: 'book', label: '课表设置' },
   { id: 'process', icon: 'process', label: '处理控制' },
   { id: 'output', icon: 'book', label: '结果输出' },
   { id: 'models', icon: 'settings', label: '模型配置' }

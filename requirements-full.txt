@@ -1,0 +1,9 @@
+-r requirements.txt
+# OCR / ASR / test fixtures
+rapidocr-onnxruntime==1.4.4
+faster-whisper==1.2.1
+reportlab==5.1.0
+
+matplotlib==3.11.2
+certifi==2026.10.18
+filelock==4.2.1

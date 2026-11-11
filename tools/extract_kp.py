@@ -65,6 +65,7 @@ SYSTEM_PROMPT = """你是消防工程专业课的助教，负责把教材原文�
 3. 数字（温度、时间、距离、浓度、尺寸等）必须原样来自原文，不得换算、不得推算；
    原文没给数字就写空数组。
 4. 无法在原文中找到依据的结论，宁可不写。
+5. definition 中的公式使用 $...$ 包裹的 LaTeX，完整保留分数、根号和上下标。JSON 中反斜杠须双写。原文分母或符号不清时不得猜测。evidence.quote 保持原文。
 
 输出必须是合法 JSON，不要任何解释文字。"""
 
@@ -174,6 +175,8 @@ def chunks_from_skeleton(course: str, pages: list[dict], skel: dict,
     # ① 按文件分组：{file_id: {page_no: page}}（file_id 缺失时回退用 source_file 分组）
     by_file: dict = {}
     for p in pages:
+        if p.get('source_kind') in {'docx','chat_network'}:
+            continue  # Supplementary exercises are indexed separately, never treated as textbook evidence.
         by_file.setdefault(p.get("file_id") or p.get("source_file"), {})[p.get("page_no")] = p
 
     def add(chapter_title, section_title, node_id, seg_pages):
@@ -209,6 +212,12 @@ def chunks_from_skeleton(course: str, pages: list[dict], skel: dict,
             if not cs or not ce:
                 continue
             for fid, fmap in by_file.items():
+                source = next(iter(fmap.values())).get('source_file')
+                if ch.get('file_scoped') or info.get('file_scoped'):
+                    if ch.get('source_file') != source:
+                        continue
+                elif info.get('legacy_source_files') and source not in info['legacy_source_files']:
+                    continue
                 owner = claimed.setdefault(fid, {})
                 for pn in range(int(cs), int(ce) + 1):
                     if pn in fmap and pn not in owner:
@@ -224,6 +233,12 @@ def chunks_from_skeleton(course: str, pages: list[dict], skel: dict,
             cs, ce = int(cs), int(ce)
             secs = ch.get("sections") or []
             for fid, fmap in by_file.items():
+                source = next(iter(fmap.values())).get('source_file')
+                if ch.get('file_scoped') or info.get('file_scoped'):
+                    if ch.get('source_file') != source:
+                        continue
+                elif info.get('legacy_source_files') and source not in info['legacy_source_files']:
+                    continue
                 owner = claimed.get(fid, {})
                 ch_pages = [fmap[pn] for pn in range(cs, ce + 1)
                             if pn in fmap and owner.get(pn) == ci]
@@ -566,6 +581,8 @@ def check(args) -> int:
     print(f"\n{'课程':<28}{'块数':>6}{'字符':>12}{'骨架':>8}")
     print("-" * 72)
     for course, pages in sorted(groups.items()):
+        if args.course and course != args.course:
+            continue
         usable = [p for p in pages if (p.get("text") or "").strip()]
         if not usable:
             print(f"{course:<28}{'-':>6}{'-':>12}{'无文本':>8}")
@@ -595,12 +612,14 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="忽略进度，重新抽取")
     ap.add_argument("--chunk-chars", type=int, default=MAX_CHARS, help="单块字符上限")
     ap.add_argument("--dry-run", action="store_true", help="只列出将处理的块")
+    ap.add_argument("--upgrade-fingerprints", action="store_true", help="备份状态并登记当前正文的完整 SHA256，不调用模型")
     ap.add_argument("--migrate-state", action="store_true",
                     help="把 state_extract.json 的旧位置序号主键迁移为内容派生主键并补指纹（一次性，零 API）")
     ap.add_argument("--verbose", action="store_true", help="打印每次调用详情")
     ap.add_argument("--include-matter", action="store_true",
                     help="包含前言/符号表/索引等非正文材料（默认跳过）")
     args = ap.parse_args()
+    args.course = kb.resolve_course(args.course)
 
     if args.check:
         return check(args)
@@ -611,7 +630,7 @@ def main() -> int:
 
     all_chunks: list[dict] = []
     for course, pages in sorted(groups.items()):
-        if args.course and args.course not in course:
+        if args.course and args.course != course:
             continue
         usable = [p for p in pages if (p.get("text") or "").strip()]
         if not usable:
@@ -632,6 +651,18 @@ def main() -> int:
         return migrate_state(all_chunks)
 
     state = kb.State("extract")
+    if args.upgrade_fingerprints:
+        candidates = [(c, state.done.get(c['chunk_id'])) for c in all_chunks]
+        if any(rec and rec.get('fp') and rec['fp'] != kb.chunk_fingerprint(c) for c,rec in candidates):
+            print('[STOP] 正文与旧状态不一致，拒绝升级指纹，请先核对数据版本')
+            return 3
+        kb.backup_files([state.path], 'fingerprints')
+        for c,rec in candidates:
+            if rec:
+                rec['fp_full'] = kb.full_chunk_fingerprint(c)
+        state.save()
+        print('完整内容指纹已登记；原 at / kps / run_id 保留。')
+        return 0
 
     # 陈旧主键守卫：**不做静默自动迁移**（隐藏的写入比显式拒跑危险）。
     # --migrate-state / --check / --force 三种模式跳过本守卫。
@@ -650,7 +681,14 @@ def main() -> int:
             print(f"[WARN] state 中有 {len(orphans)} 个孤立键"
                   f"（对应块已不存在，不影响本次运行）：{orphans[:3]}")
 
-    done_flags = [state.is_done(c["chunk_id"], kb.chunk_fingerprint(c)) for c in all_chunks]
+    done_flags = [state.is_done(c["chunk_id"], kb.chunk_fingerprint(c)) and state.done[c['chunk_id']].get('fp_full', kb.full_chunk_fingerprint(c)) == kb.full_chunk_fingerprint(c) for c in all_chunks]
+    if not (args.check or args.dry_run or args.migrate_state):
+        legacy = [c for c in all_chunks if c['chunk_id'] in state.done and not state.done[c['chunk_id']].get('fp_full')]
+        changed = [c for c,f in zip(all_chunks,done_flags) if not f and c['chunk_id'] in state.done]
+        if legacy or changed or args.force:
+            print('[STOP] 已有抽取记录缺少完整指纹或正文发生变化；拒绝追加重复知识点。')
+            print('旧状态先执行 extract --upgrade-fingerprints；正文变化时先归档对应旧批次再重新抽取。')
+            return 3
     todo_all = [c for c, f in zip(all_chunks, done_flags) if args.force or not f]
     todo = todo_all[: args.limit] if args.limit else todo_all
 
@@ -718,16 +756,15 @@ def main() -> int:
         counters[course_id] = new_idx
         if not kps:
             state.mark(chunk["chunk_id"], fingerprint=kb.chunk_fingerprint(chunk),
-                       chars=chunk["chars"], kps=0, run_id=run_id)
+                       chars=chunk["chars"], kps=0, run_id=run_id, fp_full=kb.full_chunk_fingerprint(chunk))
             print(f"{head}  无知识点（跳过）")
             continue
 
         # 立即落盘：抽取很贵，中断不允许丢结果（逐文件重试，见 append_with_retry）
-        append_with_retry(kb.KP_FILE, kps, head=head)
-        append_with_retry(kb.EVIDENCE_FILE, evs, head=head)
+        kb.backup_files([kb.KP_FILE, kb.EVIDENCE_FILE, state.path], 'extract_chunk')
+        state.done[chunk['chunk_id']] = {'fp':kb.chunk_fingerprint(chunk), 'fp_full':kb.full_chunk_fingerprint(chunk), 'at':kb.now_iso(), 'chars':chunk['chars'], 'kps':len(kps), 'run_id':run_id}
+        kb.atomic_dataset({kb.KP_FILE:kb.load_jsonl(kb.KP_FILE)+kps, kb.EVIDENCE_FILE:kb.load_jsonl(kb.EVIDENCE_FILE)+evs, state.path:{'done':state.done,'meta':state.meta,'updated_at':kb.now_iso()}})
         existing.extend(kps)
-        state.mark(chunk["chunk_id"], fingerprint=kb.chunk_fingerprint(chunk),
-                   chars=chunk["chars"], kps=len(kps), run_id=run_id)
 
         kp_all += len(kps)
         ev_all += len(evs)
@@ -779,4 +816,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    with kb.writer_lock():
+        sys.exit(main())

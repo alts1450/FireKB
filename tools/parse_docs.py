@@ -61,7 +61,7 @@ PAGES_FILE = kb.PAGES_FILE
 PAGEMAP_FILE = OUT_DIR / "page_map.json"
 REPORT_FILE = OUT_DIR / "parse_report.json"
 
-SUPPORTED = {".pdf", ".pptx", ".epub"}
+SUPPORTED = {".pdf", ".pptx", ".epub", ".docx"}
 SCAN_CHAR_THRESHOLD = 30  # 单页有效字符少于此值 -> 判为扫描页/图片页
 
 
@@ -107,6 +107,11 @@ def guess_course(rel_parts: list[str]) -> str:
     课件/建筑防火/第01讲.pdf  ->  建筑防火
     课件/第01讲.pdf           ->  未分类
     """
+    import kb
+    overrides = kb.load_json(kb.CONFIG_DIR/'source-assignments.json', {}).get('assignments', {})
+    configured = overrides.get('/'.join(rel_parts))
+    if configured:
+        return kb.resolve_course(configured)
     # rel_parts 形如 ['课件', '建筑防火', '第01讲.pdf']
     if len(rel_parts) >= 3:
         return rel_parts[-2]
@@ -379,6 +384,22 @@ def _parser():
     return get_engine("parser")
 
 
+def parse_docx(path: Path) -> tuple[list[dict], list[str]]:
+    """Stable paragraph locators; Word layout is never presented as physical pages."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+    ns = {'w':'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    with zipfile.ZipFile(path) as z:
+        root = ET.fromstring(z.read('word/document.xml'))
+    rows = []
+    for paragraph in root.findall('.//w:body//w:p', ns):
+        text = ''.join(n.text or '' for n in paragraph.findall('.//w:t', ns)).strip()
+        if text:
+            i = len(rows)+1
+            rows.append({'page_no':i,'page_label':f'第{i}段','text':text,'text_flat':flatten_text(text),'char_count':len(text),'is_scan':False,'has_table':False,'section_title':'补充文档 / 练习题'})
+    return rows, [] if rows else ['Word 文档没有可提取段落']
+
+
 def collect_sources(only: str | None = None) -> list[Path]:
     found: list[Path] = []
     for d in SRC_DIRS:
@@ -387,6 +408,13 @@ def collect_sources(only: str | None = None) -> list[Path]:
         for p in sorted(d.rglob("*")):
             if p.is_file() and p.suffix.lower() in SUPPORTED:
                 if only and p.suffix.lower() != f".{only.lower()}":
+                    continue
+                rel = p.relative_to(ARCHIVE).as_posix()
+                references = kb.load_json(kb.CONFIG_DIR / 'references.json', {})
+                declared = {w['id']: w for w in references.get('works', [])}
+                duplicate = any(p.suffix.lower() == '.' + d.get('drop', '') and declared.get(d.get('work'), {}).get('match', '\0') in rel
+                                for d in references.get('duplicates', []))
+                if duplicate:
                     continue
                 found.append(p)
     return found
@@ -408,17 +436,20 @@ def load_existing() -> dict[str, dict]:
                 continue
             fid = rec.get("file_id")
             if fid:
-                done.setdefault(fid, {"sha1": rec.get("source_sha1"), "pages": 0})["pages"] += 1
+                done.setdefault(fid, {"sha1": rec.get("source_sha1"), "course": rec.get('course'), "pages": 0})["pages"] += 1
     return done
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="M2 课件/规范解析器")
+    ap.add_argument("--course", help="课程完整名称或 ID")
     ap.add_argument("--force", action="store_true", help="忽略已有结果，全部重新解析")
-    ap.add_argument("--only", choices=["pdf", "pptx", "epub"], help="只解析某类文件")
+    ap.add_argument("--only", choices=["pdf", "pptx", "epub", "docx"], help="只解析某类文件")
     ap.add_argument("--allow-egress", action="store_true",
                     help="放行「数据出境」引擎（仅当你确认有权上传素材；默认拒绝）")
     args = ap.parse_args()
+    import kb
+    args.course = kb.resolve_course(args.course)
 
     # 引擎层：先自检依赖、再把关数据出境 —— 缺件/未同意都当场拒开工
     #   只取 **parser**：OCR 与转写是别的环节的事，它们的依赖缺不缺不该挡住 M1
@@ -434,6 +465,8 @@ def main() -> int:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     sources = collect_sources(args.only)
+    if args.course:
+        sources = [p for p in sources if guess_course(p.relative_to(ARCHIVE).parts) == args.course]
     if not sources:
         print(f"[!] 在以下目录没有找到可解析文件（.pdf/.pptx/.epub）：")
         for d in SRC_DIRS:
@@ -474,7 +507,7 @@ def main() -> int:
             continue
 
         prev = existing.get(fid)
-        if prev and prev.get("sha1") == digest and not args.force:
+        if prev and prev.get("sha1") == digest and prev.get('course') == guess_course(rel_parts) and not args.force:
             print("      跳过（未变更）")
             report["skipped_files"] += 1
             continue
@@ -538,10 +571,18 @@ def main() -> int:
             report["file_warnings"][rel] = warnings[:20]
 
     if all_records:
-        mode = "w" if args.force else "a"
-        with PAGES_FILE.open(mode, encoding="utf-8") as f:
-            for rec in all_records:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        prior = kb.load_jsonl(PAGES_FILE)
+        changed = {x['file_id'] for x in all_records}
+        kept = [x for x in prior if x.get('file_id') not in changed]
+        kb.backup_files([PAGES_FILE, PAGEMAP_FILE, REPORT_FILE], 'parse')
+    old_map = kb.load_json(PAGEMAP_FILE, {}).get('files', [])
+    selected = {x['file_id'] for x in files_meta}
+    files_meta = [x for x in old_map if x.get('file_id') not in selected] + files_meta
+    cursor = 0
+    for meta in sorted(files_meta, key=lambda x: x['source_file']):
+        meta['merged_start'] = cursor + 1
+        cursor += meta['pages']
+        meta['merged_end'] = cursor
 
     # page_map：合并页码映射（合并成单一 PDF 时按 merged_start/end 顺序拼接即可对齐）
     pageroot = {
@@ -550,8 +591,10 @@ def main() -> int:
                 "对外展示引用时请一律换算回原文件的 page_no / page_label。",
         "files": files_meta,
     }
-    PAGEMAP_FILE.write_text(json.dumps(pageroot, ensure_ascii=False, indent=2), encoding="utf-8")
-    REPORT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    outputs = {PAGEMAP_FILE: pageroot, REPORT_FILE: report}
+    if all_records:
+        outputs[PAGES_FILE] = kept + all_records
+    kb.atomic_dataset(outputs)
 
     print("\n" + "=" * 62)
     print(f"新增/更新文件 : {report['parsed_files']}")
@@ -578,4 +621,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    with kb.writer_lock():
+        sys.exit(main())

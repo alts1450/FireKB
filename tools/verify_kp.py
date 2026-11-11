@@ -43,6 +43,8 @@ ROOT = Path(os.environ.get("FIREKB_ROOT") or Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import kb  # noqa: E402
+import review_state
+from decimal import Decimal, InvalidOperation
 
 NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 NAME_SIM_THRESHOLD = 0.82
@@ -83,12 +85,25 @@ def source_text_of(kp: dict, evs: list[dict], index: dict) -> str:
     if not pages:
         return ""
     lo, hi = min(pages), max(pages)
+    if hi - lo >= len(index):
+        return "\n".join(row.get('text') or '' for (file, number), row in sorted(
+            ((key, row) for key, row in index.items() if key[0] == sf and type(key[1]) is int and lo <= key[1] <= hi),
+            key=lambda item: item[0][1],
+        ))
     parts = []
     for pn in range(lo, hi + 1):
         rec = index.get((sf, pn))
         if rec:
             parts.append(rec.get("text") or "")
     return "\n".join(parts)
+
+
+def numeric_source_text_of(kp: dict, evs: list[dict], index: dict) -> str:
+    """A number elsewhere in the extraction window cannot validate this claim."""
+    locations = {label_to_page_no(e.get('page_label')) for e in evs}
+    parts = [index[(kp.get('source_file'), n)].get('text', '')
+             for n in sorted(locations - {None}) if (kp.get('source_file'), n) in index]
+    return '\n'.join(parts) if parts else source_text_of(kp, evs, index)
 
 
 def norm(s: str) -> str:
@@ -120,21 +135,25 @@ def number_appears(num_token: str, text: str) -> bool:
     数字核验。容忍单位写法差异与 OCR 的空白差异，
     但不容忍数值本身变化（350 -> 35 或 250 都算不合格）。
     """
-    m = NUM_RE.search(num_token or "")
-    if not m:
-        return True
-    value = m.group()
-    t = norm(text)
-    if value in t:
-        return True
-    # 处理千分位与全角
-    alt = value.replace(".", "")
-    if alt and alt in t.replace(",", ""):
-        return True
-    # 形如 0.5 也可能原文写作 .5
-    if value.startswith("0.") and value[1:] in t:
-        return True
-    return False
+    # Numeric tokens, not substrings: decimal points and signs carry meaning.
+    import unicodedata
+    pattern = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?")
+    unit_re = re.compile(r"\s*(kg/m3|m3/s|m/s|kW/m2|W/m2|MPa|kPa|Pa|mm|cm|km|m3|m2|m|kW|W|MJ|kJ|J|kg|mg|g|ml|L|hours?|min|h|s|°C|℃|K|%|ppm)(?![A-Za-z])", re.I)
+    def values(s):
+        s = unicodedata.normalize("NFKC", s or "").replace("−", "-")
+        found = []
+        for m in pattern.finditer(s):
+            try:
+                unit = unit_re.match(s[m.end():])
+                label = unit.group(1).casefold() if unit else ''
+                label = {'℃':'°c','hour':'h','hours':'h'}.get(label,label)
+                found.append((Decimal(m.group().replace(",", "")),label))
+            except InvalidOperation:
+                pass
+        return found
+    required = values(num_token)
+    available = values(text)
+    return all(any(n == v and (not unit or unit == actual_unit) for v,actual_unit in available) for n,unit in required)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +243,7 @@ def recheck_evidence(course: str | None = None) -> dict:
     for e in evs:
         if course and course not in (e.get("course") or ""):
             continue
+        if e.get('evidence_type')=='chat_selection':continue
         rep["judged"] += 1
         # 键带文件标签 → 精确命中；不带标签的旧键 → 同范围候选逐一判定
         full = kb.parse_chunk_key_full(e.get("chunk_id") or "")
@@ -306,6 +326,7 @@ def main() -> int:
     ap.add_argument("--force-recheck", action="store_true",
                     help="即使 evidence 大量无法在新块索引对位（疑似旧口径）也强行回填（不推荐）")
     args = ap.parse_args()
+    args.course = kb.resolve_course(args.course)
 
     rep: dict = {}
     if args.recheck:
@@ -336,7 +357,7 @@ def main() -> int:
                       f"多个候选块（多本书页码重叠），已逐候选判定并取最高档")
 
             if args.show:
-                print("[recheck] --show 模式：audit/kp 不写盘（evidence 仍会回填）")
+                print("[recheck] --show 模式：evidence / audit / kp 均不写盘")
             else:
                 print("[recheck] audit / kp 状态将照常写盘")
 
@@ -360,11 +381,15 @@ def main() -> int:
                 print("=" * 78)
                 print("  ⚠️ evidence 文件**未被改动**。")
                 return 3
-            kb.rewrite_jsonl(kb.EVIDENCE_FILE, rep["rows"])
-            print(f"[recheck] 已就地回填：{kb.EVIDENCE_FILE}")
+            if not args.show:
+                kb.backup_files([kb.EVIDENCE_FILE], "recheck")
+                kb.rewrite_jsonl(kb.EVIDENCE_FILE, rep["rows"])
+                print(f"[recheck] 已就地回填：{kb.EVIDENCE_FILE}")
 
     kps = kb.load_jsonl(kb.KP_FILE)
     evs = kb.load_jsonl(kb.EVIDENCE_FILE)
+    if args.recheck and rep.get("rows"):
+        evs = rep["rows"]
     if args.recheck and rep.get("kps"):
         # 用重算过 confidence 的 kp 列表（写盘路径与 --recheck 一致；--show 时下面会早退不写）
         kps = rep["kps"]
@@ -374,7 +399,7 @@ def main() -> int:
         return 1
 
     if args.course:
-        kps = [k for k in kps if args.course in (k.get("course") or "")]
+        kps = [k for k in kps if args.course == k.get("course")]
         keep = {k["kp_id"] for k in kps}
         evs = [e for e in evs if e.get("kp_id") in keep]
 
@@ -383,6 +408,7 @@ def main() -> int:
         ev_by_kp[e.get("kp_id")].append(e)
 
     index = build_page_index()
+    previous_audits = kb.load_jsonl(kb.AUDIT_FILE)
 
     print("=" * 74)
     print("M5 知识点校验")
@@ -397,8 +423,12 @@ def main() -> int:
                   target: str = ""):
         nonlocal aid
         aid += 1
+        rev = review_state.revision(kp, ev_by_kp.get(kp["kp_id"], []), source_text_of(kp, ev_by_kp.get(kp["kp_id"], []), index))
+        import hashlib
+        ident = hashlib.sha256(f"{kp['kp_id']}|{a_type}|{target or kp['kp_id']}|{rev}".encode()).hexdigest()[:20]
         audits.append({
-            "audit_id": f"AUD-{aid:05d}",
+            "audit_id": f"AUD-{ident}",
+            "revision": rev,
             "type": a_type,
             "priority": priority,
             "course": kp.get("course"),
@@ -418,6 +448,17 @@ def main() -> int:
         kp_id = kp["kp_id"]
         kp_evs = ev_by_kp.get(kp_id, [])
         src = source_text_of(kp, kp_evs, index)
+        numeric_src = numeric_source_text_of(kp, kp_evs, index)
+        if kp.get('requires_content_review') and not review_state.content_decision_accepted(kp,[],review_state.revision(kp,kp_evs,src)):
+            add_audit('edited_content','P0',kp,'知识点已编辑，请核验更新后的内容')
+            p0_kp.add(kp_id)
+        if kp.get('origin_kind')=='model_conversation':
+            audits.extend(dict(a) for a in previous_audits if a.get('kp_id')==kp_id and a.get('type')=='human_confirmation' and not a.get('superseded'))
+            rev=review_state.revision(kp,kp_evs,src)
+            if not review_state.content_decision_accepted(kp,[],rev):
+                add_audit('human_confirmation_stale','P0',kp,'对话收录内容或原文已变化，请重新人工核验')
+                p0_kp.add(kp_id)
+            continue
 
         # --- 1. 引用核验 ---
         if not kp_evs:
@@ -431,12 +472,12 @@ def main() -> int:
             partial = [e for e in kp_evs if tier_of(e) == kb.VERIFY_PARTIAL]
             bad = [e for e in kp_evs
                    if tier_of(e) in (kb.VERIFY_FABRICATED, kb.VERIFY_NOT_FOUND)]
-            if bad:
+            for bad_ev in bad:
                 add_audit("quote_unverified", "P0", kp,
                           f"{len(bad)}/{len(kp_evs)} 条引用未在原文中找到"
                           f"（{tier_of(bad[0])}）",
                           "人工核对原页；若确属编造，驳回该知识点",
-                          target=bad[0].get("evidence_id", ""))
+                          target=bad_ev.get("evidence_id", ""))
                 p0_kp.add(kp_id)
                 stat["P0"] += 1
                 if not bad[0].get("quote"):
@@ -450,8 +491,8 @@ def main() -> int:
 
         # --- 2. 数字核验 ---
         nums = kp.get("numbers") or []
-        if nums and src:
-            missing = [n for n in nums if not number_appears(str(n), src)]
+        if nums and numeric_src:
+            missing = [n for n in nums if not number_appears(str(n), numeric_src)]
             if missing:
                 add_audit("number_unverified", "P0", kp,
                           f"以下数值未在来源页原文中找到：{'、'.join(missing[:6])}",
@@ -503,6 +544,18 @@ def main() -> int:
                               target=b.get("kp_id", ""))
                     stat["P1"] += 1
 
+    # AI content findings remain separate from human decisions and expire on content changes.
+    quality = {r.get('kp_id'):r for r in kb.load_jsonl(kb.KP_DIR/'quality.jsonl')}
+    for kp in kps:
+        finding = quality.get(kp['kp_id'])
+        if not finding or finding.get('verdict') == 'pass':
+            continue
+        rev = review_state.revision(kp, ev_by_kp.get(kp['kp_id'], []), source_text_of(kp, ev_by_kp.get(kp['kp_id'], []), index))
+        if finding.get('revision') == rev:
+            add_audit('semantic_review', 'P0', kp, 'AI 内容复核：'+finding.get('reason','需对照原文'),
+                      '修正内容并复核；这不是人工裁决')
+            p0_kp.add(kp['kp_id'])
+
     # --- 汇总 ---
     counts = Counter(a["priority"] for a in audits)
     types = Counter(a["type"] for a in audits)
@@ -524,10 +577,10 @@ def main() -> int:
         print("问题类型：" + "  ".join(f"{t}={n}" for t, n in types.most_common()))
 
     passed = len(kps) - len(p0_kp)
-    print(f"\n通过核验 {passed}/{len(kps)} 个知识点"
-          f"（{100 * passed / max(len(kps), 1):.1f}%）")
+    print(f"\n本轮规则未发现 P0 的知识点 {passed}/{len(kps)}"
+          f"（{100 * passed / max(len(kps), 1):.1f}%）；部分命中引用和人工裁决以最终状态为准。")
     if counts.get("P0", 0) == 0:
-        print("P0 = 0：全部知识点可直接进入背诵材料（健康状态）")
+        print("本轮未发现 P0；部分命中引用仍需复核，机器校验不等于人工审定。")
     else:
         print(f"P0 = {counts['P0']}：这些未通过核验，不会进入背诵材料，请优先处理")
 
@@ -535,13 +588,11 @@ def main() -> int:
         print("\n（--show 模式，未写文件）")
         return 0
 
-    # 写审核队列 + 回写知识点状态
-    kb.rewrite_jsonl(kb.AUDIT_FILE, audits)
+    # Preserve decisions/history and untouched courses before changing any files.
+    kb.backup_files([kb.AUDIT_FILE, kb.KP_FILE], "verify")
+    audits = review_state.reconcile(audits, kb.load_jsonl(kb.AUDIT_FILE), {k['kp_id'] for k in kps})
     for kp in kps:
-        if kp["kp_id"] in p0_kp:
-            kp["status"] = "pending"
-        else:
-            kp["status"] = "verified"
+        kp["status"] = review_state.kp_status(kp["kp_id"], audits)
         kp["verified_at"] = datetime.now().isoformat(timespec="seconds")
 
     # 保留未参与校验的知识点原状态
@@ -557,7 +608,8 @@ def main() -> int:
                     k["confidence"] = updated[k["kp_id"]].get("confidence", k.get("confidence"))
     else:
         all_kps = kps
-    kb.rewrite_jsonl(kb.KP_FILE, all_kps)
+    kb.atomic_dataset({kb.AUDIT_FILE: audits, kb.KP_FILE: all_kps})
+    print('最终知识点状态：', dict(Counter(k['status'] for k in kps)))
 
     print(f"\n审核队列：{kb.AUDIT_FILE}（{len(audits)} 条）")
     print(f"知识点状态已更新：verified / pending")
@@ -567,4 +619,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    with kb.writer_lock():
+        sys.exit(main())

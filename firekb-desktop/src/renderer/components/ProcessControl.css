@@ -17,3 +17,8 @@
 .log-entry.log-success { color: var(--success); }
 .log-entry.log-error { color: var(--error); }
 @media (max-width: 1120px) { .process-control { grid-template-columns: minmax(0, 1fr); } }
+
+.process-scope { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
+.process-scope label { display: flex; flex-direction: column; gap: 6px; color: var(--text-tertiary); font-size: 11px; }
+.process-scope select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-1); color: var(--text-primary); }
+.process-scope > div { display: flex; gap: 8px; flex-wrap: wrap; }

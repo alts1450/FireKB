@@ -115,7 +115,7 @@ def load_index() -> dict:
 
 
 def save_index(idx: dict) -> None:
-    INDEX_FILE.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+    kb.write_json(INDEX_FILE, idx)
 
 
 def grade(avg_logprob: float | None) -> str:
@@ -264,6 +264,7 @@ def main() -> int:
                     help="放行「数据出境」引擎（仅当你确认有权上传录音；默认拒绝）")
     ap.add_argument("--limit", type=int, help="只处理前 N 个文件（试跑用）")
     args = ap.parse_args()
+    args.course = kb.resolve_course(args.course)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -275,7 +276,6 @@ def main() -> int:
     #   只取 **asr**：解析/OCR 的依赖缺不缺与 M3 无关（反之亦然）。
     from engines import config_path, get_engines, require_ready
     from engines import egress as _egress
-    import kb  # 共享层：批次标识与引擎指纹（P2）
     _engines = get_engines("asr")
     require_ready(_engines)
     _egress.require_consent(_engines, config_path().parent, allow_flag=args.allow_egress)
@@ -301,7 +301,7 @@ def main() -> int:
         rel = p.relative_to(ROOT / "10_原始归档").as_posix()
         digest = sha1_file(p)
         rec = index.get(rel)
-        if rec and rec.get("sha1") == digest and not args.force:
+        if rec and rec.get("sha1") == digest and rec.get('course') == guess_course(rel.split('/')) and not args.force:
             continue
         todo.append((p, rel, guess_course(rel.split("/")), digest))
 
@@ -373,12 +373,10 @@ def main() -> int:
         meta["run_id"] = run_id
         meta["engine"] = engine_fp.get("asr") or "unknown"
 
-        with TRANSCRIPT_FILE.open("a", encoding="utf-8") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
+        previous = [r for r in kb.load_jsonl(TRANSCRIPT_FILE) if r.get('source_file') != rel]
         index[rel] = {"sha1": digest, **meta}
-        save_index(index)  # 每个文件都落盘，中断不丢进度
+        kb.backup_files([TRANSCRIPT_FILE, INDEX_FILE], 'transcribe')
+        kb.atomic_dataset({TRANSCRIPT_FILE: previous + rows, INDEX_FILE: index})
 
         total_audio += meta["duration"]
         total_elapsed += elapsed
@@ -405,4 +403,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    with kb.writer_lock():
+        sys.exit(main())

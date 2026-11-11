@@ -354,6 +354,7 @@ def main() -> int:
     ap.add_argument("--allow-egress", action="store_true",
                     help="放行「数据出境」引擎（仅当你确认有权上传素材；默认拒绝）")
     args = ap.parse_args()
+    args.course = kb.resolve_course(args.course)
 
     if args.check:
         return check(args)
@@ -532,4 +533,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    with kb.writer_lock():
+        sys.exit(main())

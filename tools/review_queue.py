@@ -64,6 +64,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import kb          # noqa: E402
 import verify_kp   # noqa: E402
+import review_state
 
 SHEET_MD = kb.REVIEW_DIR / "06_复核工作表.md"
 SHEET_TSV = kb.REVIEW_DIR / "06_复核裁决.tsv"
@@ -113,8 +114,10 @@ def _locate(body: str, quote: str) -> tuple[str, bool]:
 
 
 def collect_rows(priority: str, course: str | None) -> tuple[list[dict], dict]:
+    course = kb.resolve_course(course)
     audits = kb.load_jsonl(kb.AUDIT_FILE)
     kps = {k.get("kp_id"): k for k in kb.load_jsonl(kb.KP_FILE)}
+    ai_results={r['kp_id']:r for r in kb.load_jsonl(kb.KP_DIR/'ai_reviews.jsonl')}
     evs = kb.load_jsonl(kb.EVIDENCE_FILE)
     ev_by_id = {e.get("evidence_id"): e for e in evs}
     ev_by_kp: dict[str, list[dict]] = defaultdict(list)
@@ -130,7 +133,7 @@ def collect_rows(priority: str, course: str | None) -> tuple[list[dict], dict]:
             continue
         if a.get("status") not in (None, "pending"):
             continue                       # 已裁决过的不再进队列
-        if course and course not in (a.get("course") or ""):
+        if course and course != a.get("course"):
             continue
         kp = kps.get(a.get("kp_id")) or {}
         # 审计的 target 对 quote 类是 evidence_id；对数字/定义类就是 kp_id
@@ -163,6 +166,7 @@ def collect_rows(priority: str, course: str | None) -> tuple[list[dict], dict]:
             "body": body,
             "literal_hit": hit,
             "experimental": a.get("kp_id") in exp_ids,
+            "ai_result":ai_results.get(a.get('kp_id')),
         })
     meta = {"by_key": by_key, "by_range": by_range,
             "total_audit": len(audits), "pending_audit": sum(
@@ -171,6 +175,7 @@ def collect_rows(priority: str, course: str | None) -> tuple[list[dict], dict]:
 
 
 def export(rows: list[dict], meta: dict, priority: str, course: str | None) -> int:
+    SHEET_MD.parent.mkdir(parents=True, exist_ok=True)
     kb.REVIEW_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     by_type = Counter(r["type"] for r in rows)
@@ -215,6 +220,12 @@ def export(rows: list[dict], meta: dict, priority: str, course: str | None) -> i
         L.append(f"- **判词**：{r['detail']}")
         L.append(f"- **建议**：{r['suggestion']}")
         L.append("")
+        if r.get('ai_result'):
+            ai=r['ai_result']
+            L += [f"**AI 联网自查：** {ai.get('score',0):.1%}（证据评分） · {ai.get('checked_at','')}",
+                  ai.get('reason',ai.get('error','')), '']
+            L += [f"- [{s['title']}]({s['url']})" for s in ai.get('sources') or ai.get('retrieved_sources',[])]
+            L += ['']
         if r["definition"]:
             L.append(f"**知识点定义**：{r['definition'][:300]}")
             L.append("")
@@ -242,11 +253,17 @@ def export(rows: list[dict], meta: dict, priority: str, course: str | None) -> i
 
     SHEET_MD.write_text("\n".join(L), encoding="utf-8")
 
+    previous = {}
+    if SHEET_TSV.exists():
+        with SHEET_TSV.open(encoding="utf-8-sig", newline="") as old:
+            previous = {r.get("audit_id"): r for r in csv.DictReader(old, delimiter="\t")}
+        kb.backup_files([SHEET_TSV], "queue_export")
     with SHEET_TSV.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter="\t")
         w.writerow(["audit_id", "kp_id", "course", "kp_name", "type", "裁决(ok/bad/skip)", "备注"])
         for r in rows:
-            w.writerow([r["audit_id"], r["kp_id"], r["course"], r["kp_name"], r["type"], "", ""])
+            prev = previous.get(r["audit_id"], {})
+            w.writerow([r["audit_id"], r["kp_id"], r["course"], r["kp_name"], r["type"], prev.get("裁决(ok/bad/skip)", ""), prev.get("备注", "")])
 
     print(f"工作表：{SHEET_MD}（{len(rows)} 条）")
     print(f"裁决表：{SHEET_TSV}（填完后 --apply）")
@@ -296,6 +313,22 @@ def apply(tsv: Path, yes: bool) -> int:
         ev_by_kp[e.get("kp_id")].append(e)
 
     now = datetime.now().isoformat(timespec="seconds")
+    page_index = verify_kp.build_page_index()
+    # Validate the entire batch before applying even one decision.
+    seen = set()
+    for r, v in rows:
+        a = aud_by_id.get(r.get("audit_id")); kp = kps.get(r.get("kp_id"))
+        if a is None or kp is None or a.get("kp_id") != r.get("kp_id"):
+            print("[FAIL] 裁决表与当前审核条目不匹配，请重新导出")
+            return 3
+        if a['audit_id'] in seen:
+            print("[FAIL] 同一问题出现多条裁决")
+            return 3
+        seen.add(a['audit_id'])
+        current = review_state.revision(kp, ev_by_kp.get(kp['kp_id'], []), verify_kp.source_text_of(kp, ev_by_kp.get(kp['kp_id'], []), page_index))
+        if a.get("revision") != current or a.get("superseded"):
+            print("[FAIL] 素材或知识点已变化，旧裁决表失效，请重新核验并导出")
+            return 3
     stat = Counter()
     for r, v in rows:
         aid, kp_id = r.get("audit_id"), r.get("kp_id")
@@ -306,12 +339,13 @@ def apply(tsv: Path, yes: bool) -> int:
             continue
         a["status"] = "done" if v in ("ok", "bad") else "pending"
         a["human_review"] = {"verdict": v, "at": now, "by": "人工复核工作表"}
-        # ok → 该 kp 的全部 evidence 视为人工确认（写入口径，不覆盖机器判词）
+        # An issue-level decision confirms only its targeted evidence.
         if v == "ok":
-            for e in ev_by_kp.get(kp_id, []):
+            e = ev_by_id.get(a.get("target"))
+            if e is not None:
                 e["human_verified"] = True
                 e["human_verified_at"] = now
-            kp["status"] = "verified"
+                e["human_revision"] = a["revision"]
             stat["ok"] += 1
         elif v == "bad":
             kp["status"] = "rejected"
@@ -321,15 +355,17 @@ def apply(tsv: Path, yes: bool) -> int:
         else:
             stat["skip"] += 1
 
-    kb.rewrite_jsonl(kb.EVIDENCE_FILE, evs)
-    kb.rewrite_jsonl(kb.KP_FILE, list(kps.values()))
-    kb.rewrite_jsonl(kb.AUDIT_FILE, audits)
+    for kp_id in {r.get('kp_id') for r, _ in rows}:
+        kps[kp_id]['status'] = review_state.kp_status(kp_id, audits)
+
+    kb.atomic_dataset({kb.EVIDENCE_FILE: evs, kb.KP_FILE: list(kps.values()), kb.AUDIT_FILE: audits})
     print(f"已写回：{dict(stat)}")
     print("下一步：python -m firekb review   （重跑 M6，把 rejected 从产物里剔除）")
     return 0
 
 
 def main() -> int:
+    global SHEET_MD, SHEET_TSV
     ap = argparse.ArgumentParser(description="人工复核工作表")
     ap.add_argument("--export", action="store_true", help="导出工作表（只读）")
     ap.add_argument("--apply", metavar="TSV", help="按裁决表回写")
@@ -337,6 +373,10 @@ def main() -> int:
     ap.add_argument("--course", help="只导出某门课")
     ap.add_argument("--yes", action="store_true", help="确认写回")
     args = ap.parse_args()
+    args.course = kb.resolve_course(args.course)
+    scope = kb.course_slug(args.course) if args.course else 'all'
+    folder = kb.REVIEW_DIR / 'review-queue' / scope / args.priority
+    SHEET_MD, SHEET_TSV = folder/'06_复核工作表.md', folder/'06_复核裁决.tsv'
 
     if args.apply:
         return apply(Path(args.apply), args.yes)
@@ -350,4 +390,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    with kb.writer_lock():
+        sys.exit(main())

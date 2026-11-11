@@ -127,7 +127,7 @@ class LocalPermissiveParser(BaseEngine):
 
     # 与 local_pymupdf 同一张后缀表：PDF 走本引擎，PPTX/EPUB 走各自的宽松实现
     # （python-pptx = MIT，EPUB 用标准库 zipfile）
-    SUFFIX_FN = {".pdf": "parse_pdf", ".pptx": "parse_pptx", ".epub": "parse_epub"}
+    SUFFIX_FN = {".pdf": "parse_pdf", ".pptx": "parse_pptx", ".epub": "parse_epub", ".docx": "parse_docx"}
 
     def supports(self, suffix: str) -> bool:
         return suffix.lower() in self.SUFFIX_FN

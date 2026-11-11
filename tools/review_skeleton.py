@@ -551,6 +551,7 @@ def main() -> int:
     ap.add_argument("--show", action="store_true", help="只在屏幕上显示，不写复核报告")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+    args.course = kb.resolve_course(args.course)
 
     if not SKELETON_FILE.exists():
         print(f"[FAIL] 骨架不存在：{SKELETON_FILE}，请先运行 build_skeleton.py")
@@ -576,7 +577,7 @@ def main() -> int:
     reviews: dict[str, dict] = {}
     todo = list(sorted(skeleton.get("courses", {}).items()))
     if args.course:
-        todo = [(k, v) for k, v in todo if args.course in k]
+        todo = [(k, v) for k, v in todo if args.course == k]
     if args.limit:
         todo = todo[: args.limit]
 
@@ -691,4 +692,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    with kb.writer_lock():
+        sys.exit(main())

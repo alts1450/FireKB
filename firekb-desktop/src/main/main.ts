@@ -1,7 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog, nativeTheme } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, nativeTheme, shell } from 'electron'
 import path from 'path'
 import { existsSync } from 'fs'
 import { registerDeployment, deploymentBusy } from './deployment'
+import { registerIntake } from './intake'
 import { spawn } from 'child_process'
 import fs from 'fs/promises'
 import type { EgressEntry, EngineState, SaveResult } from '../types/electron'
@@ -11,6 +12,7 @@ let mainWindow: BrowserWindow | null = null
 const FIREKB_ROOT = process.env.FIREKB_ROOT || path.join(__dirname, '..', '..', '..')
 const PYTHON_PATH = process.env.PYTHON_PATH || (existsSync(path.join(FIREKB_ROOT, '.venv/Scripts/python.exe')) ? path.join(FIREKB_ROOT, '.venv/Scripts/python.exe') : 'python')
 registerDeployment(FIREKB_ROOT, PYTHON_PATH, () => mainWindow)
+registerIntake(FIREKB_ROOT, PYTHON_PATH, () => mainWindow)
 
 // 桌面端只编辑 FireKB 既有的两份配置，不另存一份副本
 const CONFIG_DIR = path.join(FIREKB_ROOT, '00_配置')
@@ -57,12 +59,19 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true,
     }
   })
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  mainWindow.webContents.on('will-navigate', event => event.preventDefault())
+  mainWindow.webContents.on('will-redirect', event => event.preventDefault())
+
+  const devUrl = process.env.VITE_DEV_SERVER_URL && !app.isPackaged
+    ? new URL(process.env.VITE_DEV_SERVER_URL) : null
+  if (devUrl && ['http:', 'https:'].includes(devUrl.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(devUrl.hostname)) {
+    mainWindow.loadURL(devUrl.href)
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
@@ -117,17 +126,19 @@ function runPython(args: string[], timeoutMs = 60000): Promise<PythonResult> {
     const child = spawn(PYTHON_PATH, args, {
       cwd: FIREKB_ROOT,
       windowsHide: true,
-      env: { ...process.env, FIREKB_ROOT, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+      env: { ...process.env, FIREKB_ROOT, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
     })
 
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
     let stdout = ''
     let stderr = ''
     const timer = setTimeout(() => child.kill(), timeoutMs)
 
-    child.stdout.on('data', (data: Buffer) => {
+    child.stdout.on('data', (data: string) => {
       stdout += data.toString()
     })
-    child.stderr.on('data', (data: Buffer) => {
+    child.stderr.on('data', (data: string) => {
       stderr += data.toString()
     })
     child.on('error', (err: Error) => {
@@ -289,7 +300,7 @@ ipcMain.handle('dialog:selectFiles', async () => {
   const result = await dialog.showOpenDialog(mainWindow!, {
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'Documents', extensions: ['pdf', 'pptx', 'epub'] },
+      { name: '课程资料与录音', extensions: ['pdf', 'pptx', 'epub', 'aac', 'm4a', 'mp3', 'wav', 'mp4', 'flac', 'docx'] },
       { name: 'All Files', extensions: ['*'] }
     ]
   })
@@ -299,8 +310,9 @@ ipcMain.handle('dialog:selectFiles', async () => {
   return result.filePaths
 })
 
-// 保存文件
-ipcMain.handle('dialog:saveFile', async (_event, defaultPath: string) => {
+let approvedTextExport: { senderId: number; filePath: string } | undefined
+ipcMain.handle('dialog:saveFile', async (event, defaultPath: string) => {
+  approvedTextExport = undefined
   const result = await dialog.showSaveDialog(mainWindow!, {
     defaultPath,
     filters: [
@@ -309,14 +321,19 @@ ipcMain.handle('dialog:saveFile', async (_event, defaultPath: string) => {
       { name: 'All Files', extensions: ['*'] }
     ]
   })
-  if (result.canceled) {
+  if (result.canceled || !result.filePath) {
     return null
   }
+  approvedTextExport = { senderId: event.sender.id, filePath: result.filePath }
   return result.filePath
 })
 
 // 写文本文件（导出知识点等）
-ipcMain.handle('file:writeText', async (_event, filePath: string, content: string) => {
+ipcMain.handle('file:writeText', async (event, filePath: string, content: string) => {
+  if (typeof content !== 'string' || approvedTextExport?.senderId !== event.sender.id || approvedTextExport.filePath !== filePath) {
+    throw new Error('请在保存窗口选择导出文件')
+  }
+  approvedTextExport = undefined
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true })
     await fs.writeFile(filePath, content, 'utf-8')
@@ -327,22 +344,63 @@ ipcMain.handle('file:writeText', async (_event, filePath: string, content: strin
 })
 
 // 获取项目状态
+ipcMain.handle('firekb:exportKnowledgeZip', async (_event, course: unknown, includeSources: unknown) => {
+  if (typeof course !== 'string' || typeof includeSources !== 'boolean') throw new Error('请选择导出范围')
+  const label = (course || '全科').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 80)
+  const selection = await dialog.showSaveDialog(mainWindow!, {
+    title: '导出知识点 ZIP',
+    defaultPath: `知识点_${label}.zip`,
+    filters: [{ name: 'ZIP 压缩包', extensions: ['zip'] }],
+  })
+  if (selection.canceled || !selection.filePath) return null
+  const args = ['-B', 'tools/export_knowledge.py', `--output=${selection.filePath}`]
+  if (course) args.push(`--course=${course}`)
+  if (includeSources) args.push('--include-sources')
+  const result = await runPython(args, 30 * 60_000)
+  if (result.code !== 0) throw new Error(result.stderr.trim() || '导出超时，请重新尝试')
+  return JSON.parse(result.stdout)
+})
+
+ipcMain.handle('firekb:importKnowledgeZip', async () => {
+  const selection = await dialog.showOpenDialog(mainWindow!, {
+    title: '导入知识点 ZIP',
+    properties: ['openFile'],
+    filters: [{ name: 'ZIP 压缩包', extensions: ['zip'] }],
+  })
+  if (selection.canceled || !selection.filePaths.length) return null
+  const result = await runPython(['-B', 'tools/import_knowledge.py', `--input=${selection.filePaths[0]}`], 30 * 60_000)
+  if (result.code !== 0) throw new Error(result.stderr.trim() || '导入超时，请重新尝试')
+  return JSON.parse(result.stdout)
+})
+
+ipcMain.handle('firekb:openOutput', async (_event, course: unknown) => {
+  const courses = JSON.parse(await fs.readFile(path.join(CONFIG_DIR, 'courses.json'), 'utf-8')).courses || []
+  const found = courses.find((c: { name: string; id: string }) => c.name === course || c.id === course)
+  if (course && !found) throw new Error('请选择有效课程')
+  const folder = path.join(FIREKB_ROOT, '40_复习产物', found?.id || 'all')
+  await fs.mkdir(folder, { recursive: true })
+  const error = await shell.openPath(folder)
+  if (error) throw new Error(error)
+})
+
 ipcMain.handle('firekb:getStatus', async () => {
   return new Promise((resolve, reject) => {
     const child = spawn(PYTHON_PATH, ['-m', 'firekb', 'status'], {
       cwd: FIREKB_ROOT,
       windowsHide: true,
-      env: { ...process.env, FIREKB_ROOT, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+      env: { ...process.env, FIREKB_ROOT, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
     })
 
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
     let stdout = ''
     let stderr = ''
 
-    child.stdout.on('data', (data: Buffer) => {
+    child.stdout.on('data', (data: string) => {
       stdout += data.toString()
     })
 
-    child.stderr.on('data', (data: Buffer) => {
+    child.stderr.on('data', (data: string) => {
       stderr += data.toString()
     })
 
@@ -362,6 +420,10 @@ ipcMain.handle('firekb:getStatus', async () => {
 
 // 运行 FireKB 命令
 ipcMain.handle('firekb:runCommand', async (_event, command: string, args: string[] = []) => {
+  const desktopCommands = ['parse', 'ocr', 'skeleton', 'extract', 'verify', 'review', 'export', 'transcribe', 'pipeline', 'ai-review']
+  if (!desktopCommands.includes(command) || !Array.isArray(args) || args.some(arg => typeof arg !== 'string')) {
+    throw new Error('请选择有效的处理操作')
+  }
   if (deploymentBusy()) throw new Error('环境配置正在运行，请等待完成')
   if (['extract', 'verify', 'skeleton', 'pipeline'].includes(command)) {
     const start = await runPython(['tools/device_setup.py', '--start'], 90000)
@@ -371,18 +433,20 @@ ipcMain.handle('firekb:runCommand', async (_event, command: string, args: string
     const child = spawn(PYTHON_PATH, ['-m', 'firekb', command, ...args], {
       cwd: FIREKB_ROOT,
       windowsHide: true,
-      env: { ...process.env, FIREKB_ROOT, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+      env: { ...process.env, FIREKB_ROOT, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
     })
 
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
     let stdout = ''
     let stderr = ''
 
-    child.stdout.on('data', (data: Buffer) => {
+    child.stdout.on('data', (data: string) => {
       stdout += data.toString()
       mainWindow?.webContents.send('firekb:output', data.toString())
     })
 
-    child.stderr.on('data', (data: Buffer) => {
+    child.stderr.on('data', (data: string) => {
       stderr += data.toString()
       mainWindow?.webContents.send('firekb:error', data.toString())
     })
@@ -623,6 +687,56 @@ ipcMain.handle('firekb:getCourses', async () => {
 })
 
 // 读取知识点
+ipcMain.handle('firekb:openWebSource', async (_event, value: unknown) => {
+  if (typeof value !== 'string') throw new Error('无效来源链接')
+  const url = new URL(value)
+  if (!['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password) throw new Error('无效来源链接')
+  await shell.openExternal(url.href)
+})
+
+const chatJobs = new Map<string, ReturnType<typeof spawn>>()
+ipcMain.handle('firekb:chatCancel', (event, id: string) => { chatJobs.get(`${event.sender.id}:${id}`)?.kill() })
+ipcMain.handle('firekb:chat', async (event, id: unknown, data: unknown) => {
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(id)) throw new Error('无效对话请求')
+  const input = JSON.stringify(data)
+  if (!input || input.length > 180000) throw new Error('对话过长，请新建对话')
+  const key = `${event.sender.id}:${id}`
+  const isOptions = (data as { action?: string })?.action === 'options'
+  if (chatJobs.size && !isOptions) throw new Error('请等待当前回答完成')
+  return new Promise((resolve, reject) => {
+    const action = (data as { action?: string })?.action
+    if (action === 'knowledge' && deploymentBusy()) { reject(new Error('Processing in progress')); return }
+    const script = action === 'knowledge' ? 'tools/knowledge_manage.py' : action === 'collect' ? 'tools/chat_collect.py' : 'tools/kb_chat.py'
+    const child = spawn(PYTHON_PATH, ['-B', script], { cwd: FIREKB_ROOT, windowsHide: true, env: { ...process.env, FIREKB_ROOT, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' } })
+    if (!isOptions) chatJobs.set(key, child)
+    let stdout = '', stderr = ''
+    const timer = setTimeout(() => child.kill(), 210000)
+    child.stdout?.setEncoding('utf8'); child.stderr?.setEncoding('utf8')
+    child.stdout?.on('data', data => { stdout += data }); child.stderr?.on('data', data => { stderr += data })
+    child.on('error', err => { clearTimeout(timer); chatJobs.delete(key); reject(err) })
+    child.on('close', code => {
+      clearTimeout(timer); chatJobs.delete(key)
+      if (code !== 0) { reject(new Error(stderr || '回答已取消或超时')); return }
+      try { resolve(JSON.parse(stdout)) } catch { reject(new Error('回答格式错误')) }
+    })
+    child.stdin?.on('error', () => { /* A cancelled child may close stdin first. */ })
+    child.stdin?.end(input)
+  })
+})
+
+ipcMain.handle('firekb:humanReview', async (_event, action: unknown, kpId: unknown, token: unknown) => {
+  if (deploymentBusy()) throw new Error('环境配置正在运行，请等待完成')
+  if (!['inspect', 'approve'].includes(String(action)) || typeof kpId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(kpId)) throw new Error('无效核验请求')
+  const args = ['-B', 'tools/human_review.py', '--action', String(action), '--kp-id', kpId]
+  if (action === 'approve') {
+    if (typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token)) throw new Error('请先展开知识点并核对原文')
+    args.push('--token', token)
+  }
+  const result = await runPython(args)
+  if (result.code !== 0) throw new Error(result.stderr || '人工核验保存失败')
+  return JSON.parse(result.stdout)
+})
+
 ipcMain.handle('firekb:getKnowledgePoints', async (_event, filters?: { course?: string, subject?: string }) => {
   const kpPath = path.join(FIREKB_ROOT, '30_知识点', 'kp.jsonl')
   const content = await fs.readFile(kpPath, 'utf-8')
@@ -634,7 +748,17 @@ ipcMain.handle('firekb:getKnowledgePoints', async (_event, filters?: { course?: 
   }
 
   // Keep the Python data contract intact; adapt presentation fields at the IPC boundary.
-  return kps.map(kp => ({ ...kp, title: kp.title ?? kp.name ?? '', content: kp.content ?? kp.definition ?? '' }))
+  const mathDisplays: Record<string, { source_definition: string; formatted: string }> = {}
+  await Promise.all([...new Set(kps.map(kp => kp.course_id))].map(async id => {
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id)) return
+    try { Object.assign(mathDisplays, JSON.parse(await fs.readFile(path.join(FIREKB_ROOT, '40_复习产物', id, 'math-display.json'), 'utf-8'))) } catch { /* Course may not have been exported yet. */ }
+  }))
+  const reviews: Record<string, unknown> = {}
+  const reviewText = await readTextFile(path.join(FIREKB_ROOT, '30_知识点', 'ai_reviews.jsonl'))
+  for (const line of reviewText.replace(/^\uFEFF/, '').split('\n').filter(line => line.trim())) {
+    const row = JSON.parse(line); reviews[row.kp_id] = row
+  }
+  return kps.map(kp => ({ ...kp, ai_review_result: reviews[kp.kp_id], title: kp.title ?? kp.name ?? '', content: (mathDisplays[kp.kp_id]?.source_definition === kp.definition ? mathDisplays[kp.kp_id].formatted : undefined) ?? kp.content ?? kp.definition ?? '' }))
 })
 
 ipcMain.handle('models:testConnection', async () => {

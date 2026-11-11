@@ -1,0 +1,6 @@
+# Base runtime, Windows Python 3.12
+pypdf==6.21.4
+pypdfium2==5.14.0
+python-pptx==1.0.2
+tzdata==2026.6
+pillow==13.0.0

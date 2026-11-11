@@ -40,7 +40,7 @@ CONTRACTS = {
                 "importance", "node_id", "note", "numbers", "page_label_end",
                 "page_label_start", "run_id", "section", "source_file", "status", "type",
                 "verified_at"],
-        "types": {"aliases": list, "numbers": list, "evidence_ids": list},
+        "types": {"aliases": list, "numbers": list, "evidence_ids": list, "ai_verification":dict},
         # rejected 由 review_queue --apply 写入（人工复核判定不可用）。
         # 加它之前先确认下游都认：契约要跟着**真实取值**走，也要挡在写入之前。
         "enum": {"status": {"verified", "pending", "rejected"}},
@@ -52,7 +52,7 @@ CONTRACTS = {
         "opt": ["chapter", "course", "course_id", "evidence_type", "extracted_at", "node_id",
                 "page_label", "quote_verified", "rechecked_at", "run_id", "section",
                 "source_file", "verify_tier"],
-        "types": {"quote_verified": bool},
+        "types": {"quote_verified": bool,"ai_verification":dict},
         "enum": {"verify_method": {"exact", "partial", "fabricated", "not_found"}},
         "key": "evidence_id",
         "fk": {"kp_id": "kp.jsonl"},
@@ -65,6 +65,15 @@ CONTRACTS = {
                 "suggestion", "target"],
         "enum": {"priority": {"P0", "P1", "P2"}, "status": {"pending", "done", "ignored"}},
         "key": "audit_id",
+        "types":{"ai_review":dict},
+    },
+    "ai_reviews.jsonl": {
+        "path":lambda:kb.KP_DIR/'ai_reviews.jsonl',
+        "req":["kp_id","policy","status","score"],
+        "opt":["course","revision","checked_at","valid_until","models","claims","judgments","sources","retrieved_sources","reason","error","components","gates","scope"],
+        "types":{"claims":list,"judgments":list,"sources":list,"gates":dict,"components":dict},
+        "enum":{"policy":{"ai-web-v1","ai-web-v2"},"status":{"approved","needs_human"}},
+        "key":"kp_id","fk":{"kp_id":"kp.jsonl"},
     },
     "pages.jsonl": {
         "path": lambda: kb.PAGES_FILE,
@@ -127,7 +136,7 @@ MAX_SHOW = 5
 def _rows(p: Path) -> tuple[list[dict], list[str]]:
     bad = []
     rows = []
-    for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+    for i, line in enumerate(p.read_text(encoding="utf-8-sig", errors="replace").split('\n'), 1):
         if not line.strip():
             continue
         try:

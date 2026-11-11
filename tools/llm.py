@@ -141,6 +141,7 @@ def chat(
     verbose: bool = False,
     data_category: str = "personal",
     purpose: str = "firekb_knowledge_processing",
+    reasoning_effort: str | None = None,
 ) -> dict:
     """
     调用兼容 OpenAI 协议的服务，返回 {"content", "usage", "model", "finish_reason"}。
@@ -149,10 +150,7 @@ def chat(
     cfg = load_env()
     key = (cfg.get("DEEPSEEK_API_KEY") or "").strip()
     if not has_valid_key(cfg):
-        raise RuntimeError(
-            f"未配置可用的 API Key。请编辑 {ENV_FILE}，把 DEEPSEEK_API_KEY 填成真实值。\n"
-            f'当前值：{"(空)" if not key else key[:8] + "..."}'
-        )
+        raise RuntimeError(f"请在模型配置中填写可用的 API Key，或编辑 {ENV_FILE} 的 DEEPSEEK_API_KEY。")
     base = eg.normalize_recipient(cfg.get("DEEPSEEK_BASE_URL") or DEFAULT_BASE)
     local = eg.is_local_recipient(base)
     # Checked before request construction/retries. No automatic cloud fallback.
@@ -179,6 +177,12 @@ def chat(
     if disable_thinking and provider == "deepseek":
         # DeepSeek 思考模式开关；关闭后更快更省，适合批量结构化任务
         payload["thinking"] = {"type": "disabled"}
+    if reasoning_effort is not None:
+        if reasoning_effort not in {'none','low','high','max'}:raise ValueError('不支持的推理强度')
+        if provider != 'deepseek' and reasoning_effort != 'none':raise ValueError('此端点尚未声明推理强度能力')
+        if provider == 'deepseek':
+            payload['thinking']={'type':'disabled' if reasoning_effort=='none' else 'enabled'}
+            if reasoning_effort!='none':payload['reasoning_effort']=reasoning_effort
 
     if local and provider == "ollama":
         payload["reasoning_effort"] = "none"
@@ -229,7 +233,8 @@ def chat(
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
-                detail = exc.read().decode("utf-8", "ignore")[:600]
+                detail = exc.read(16384).decode("utf-8", "ignore")
+                detail = detail.replace(key, '[已隐藏]')[:600] if key else detail[:600]
             except Exception:
                 pass
             last_err = RuntimeError(f"HTTP {exc.code}: {detail}")

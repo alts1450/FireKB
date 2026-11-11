@@ -1,4 +1,13 @@
 export interface ElectronAPI {
+  chat: (id: string, data: unknown) => Promise<ChatAnswer & ChatOptions>
+  cancelChat: (id: string) => Promise<void>
+  openWebSource: (url: string) => Promise<void>
+  importKnowledgeZip: () => Promise<KnowledgeImportResult | null>
+  exportKnowledgeZip: (course: string, includeSources: boolean) => Promise<KnowledgeZipResult | null>
+  openOutput: (course?: string) => Promise<void>
+  intake: <T = unknown>(action: import('./intake').IntakeAction, data?: unknown) => Promise<T>
+  readTimetableFile: () => Promise<{ name: string; text: string } | null>
+  exportTimetable: (data: unknown, csv?: boolean) => Promise<string | null>
   inspectDevice: () => Promise<DeploymentReport>
   getDeploymentJob: () => Promise<DeploymentJob>
   installDeployment: (profile: string) => Promise<SaveResult>
@@ -11,12 +20,16 @@ export interface ElectronAPI {
   setAppearanceMode: (mode: 'light' | 'dark' | 'system') => Promise<void>
   selectFolder: () => Promise<string | null>
   selectFiles: () => Promise<string[]>
+  getPathForFile: (file: File) => string
   saveFile: (defaultPath: string) => Promise<string | null>
   writeTextFile: (filePath: string, content: string) => Promise<WriteResult>
   getStatus: () => Promise<{ success: boolean; output: string }>
   runCommand: (command: string, args?: string[]) => Promise<CommandResult>
   getCourses: () => Promise<Course[]>
   getKnowledgePoints: (filters?: KPFilters) => Promise<KnowledgePoint[]>
+  manageKnowledge: (data: unknown) => Promise<KnowledgeManagementResult>
+  inspectHumanReview: (kpId: string) => Promise<HumanReviewDetail>
+  approveHumanReview: (kpId: string, token: string) => Promise<Pick<KnowledgePoint, 'kp_id' | 'status' | 'verification_method' | 'human_review'>>
   getModelConfig: () => Promise<ModelConfigPayload>
   setModelConfig: (patch: ModelConfigPatch) => Promise<SaveResult>
   onOutput: (callback: (data: string) => void) => () => void
@@ -68,6 +81,28 @@ export interface KnowledgePoint {
   page_label_end: string
   importance: number
   status: 'verified' | 'pending' | 'rejected'
+  verification_method?: string
+  human_review?: { verdict: string; at: string; by: string; revision: string }
+  source_type?: string
+  note?: string
+  ai_verification?: AiVerification
+  ai_review_result?: AiVerification & { reason?: string; error?: string; retrieved_sources?: AiSource[] }
+}
+
+export interface AiSource { url: string; title: string }
+export interface ChatOptions { models: string[]; defaultModel: string; efforts: string[] }
+export interface ChatSegment { text: string; kind: 'normal' | 'cited' | 'unsupported'; citation?: { id: string; name: string; original: string; source: string; page: string; coverage_note?: string } }
+export interface ChatAnswer { answer_id?: string; kp_id?: string; duplicate?: boolean; warning?: string; incomplete?: boolean; web_sources?: Array<{ title: string; url: string }>; web_error?: string; segments: ChatSegment[]; model: string; source_count: number; cited_source_count?: number }
+export interface HumanReviewDetail {
+  kp_id: string; name: string; definition: string; numbers: Array<string | number>; note: string
+  source_file: string; source_text: string; token: string; status: string
+  evidence: Array<{ quote: string; page_label: string }>
+  issues: Array<{ type: string; detail: string }>
+}
+export interface AiVerification {
+  policy?: string
+  status: 'approved' | 'needs_human'; score: number; checked_at?: string; valid_until?: string
+  scope?: string; sources?: AiSource[]; gates?: Record<string, boolean>
 }
 
 export interface KPFilters {
@@ -207,4 +242,23 @@ export interface DeploymentJob {
 }
 export interface ConsentStatus {
   recipient: string; purpose: string; local: boolean; approved: EgressLevel[]
+}
+
+export interface KnowledgeDraft { name: string; definition: string; note: string; numbers: Array<string | number>; importance: number; chapter: string; section: string | null }
+export interface KnowledgeManagementResult { point?: KnowledgeDraft; token?: string; ids?: string[]; delete_token?: string; names?: string[]; deleted?: string[]; backup?: string; unchanged?: boolean }
+
+export interface KnowledgeZipResult {
+  path: string
+  course_count: number
+  point_count: number
+  source_count: number
+  missing_count: number
+}
+
+export interface KnowledgeImportResult {
+  added: number
+  skipped: number
+  source_count: number
+  source_conflicts: number
+  pending_count: number
 }

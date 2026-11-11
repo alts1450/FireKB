@@ -1,144 +1,106 @@
-# -*- coding: utf-8 -*-
-"""
-FireKB 流水线编排 —— 一条命令跑完全流程
-==========================================
-按依赖顺序依次执行各模块，每步都有前置条件检查与结果汇总。
-
-流水线顺序：
-  1. parse_docs     解析课件/教材（PDF/PPTX/EPUB -> 页级文本）
-  2. ocr_pages      扫描页 OCR（耗时最长，可用 --skip-ocr 跳过）
-  3. build_skeleton 构建知识骨架（章节结构）
-  4. extract_kp     抽取知识点 + 证据引用（消耗 API）
-  5. verify_kp      校验与审核队列
-  6. make_review    生成复习产物
-
-用法：
-  python tools\\pipeline.py                  # 跑完整流程
-  python tools\\pipeline.py --skip-ocr       # 跳过 OCR（扫描页少时）
-  python tools\\pipeline.py --only ocr       # 只跑某一步
-  python tools\\pipeline.py --from skeleton  # 从某一步开始往后跑
-  python tools\\pipeline.py --dry-run        # 只显示将执行的步骤
-
-注意：OCR 在后台跑着时不要重复执行本脚本的 ocr 步骤（会重复占用 CPU）。
-"""
-
-from __future__ import annotations
-
+"""Course-scoped, fail-fast pipeline with content-checked resume."""
 import argparse
+import hashlib
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
+import kb
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
-
-ROOT = Path(os.environ.get("FIREKB_ROOT") or Path(__file__).resolve().parents[1])
-TOOLS = ROOT / "tools"
-PY = sys.executable
-
-STEPS: list[tuple[str, str, str, bool]] = [
-    # (key, 标题, 脚本参数, 耗时步)
-    ("parse", "解析课件/教材（PDF/PPTX/EPUB）", "parse_docs.py", False),
-    ("ocr", "扫描页 OCR（影印版教材）", "ocr_pages.py", True),
-    ("skeleton", "构建知识骨架（章节结构）", "build_skeleton.py", False),
-    ("skeleton_review", "AI 复核骨架层级（修正二级内容被当成一级章）",
-     "review_skeleton.py --apply", False),
-    ("extract", "抽取知识点与证据引用（消耗 API）", "extract_kp.py", False),
-    ("verify", "校验知识点并生成审核队列", "verify_kp.py", False),
-    ("review", "生成复习产物（枝干/背诵卡/对照表）", "make_review.py", False),
-]
-ORDER = [s[0] for s in STEPS]
+ORDER = ['parse', 'ocr', 'transcribe', 'skeleton', 'skeleton_review', 'extract', 'verify', 'quality', 'review', 'export']
+CODE = Path(__file__).resolve().parents[1]
 
 
-def run_step(key: str, title: str, script: str, extra: list[str]) -> tuple[bool, float]:
-    # script 允许带参数（如 "review_skeleton.py --apply"），便于把「复核并写回」串成一步
-    parts = script.split()
-    path = TOOLS / parts[0]
-    if not path.exists():
-        print(f"\n[跳过] 找不到脚本：{path}")
-        return False, 0.0
-    print("\n" + "=" * 76)
-    print(f"▶ {title}")
-    print(f"  脚本：{script} {' '.join(extra)}")
-    print("=" * 76)
-    t0 = time.time()
-    try:
-        proc = subprocess.run([PY, str(path), *parts[1:], *extra], cwd=str(ROOT))
-        ok = proc.returncode == 0
-    except KeyboardInterrupt:
-        print("\n[中断] 用户取消")
-        raise
-    except Exception as exc:
-        print(f"[FAIL] 启动失败：{type(exc).__name__}: {exc}")
-        return False, time.time() - t0
-    dt = time.time() - t0
-    status = "完成" if ok else f"失败（退出码 {proc.returncode}）"
-    print(f"\n◀ {title}  {status}　用时 {dt:.1f} 秒")
-    return ok, dt
+def digest(paths):
+    out = {}
+    for p in paths:
+        if p.is_file():
+            with p.open('rb') as f:
+                out[str(p)] = hashlib.file_digest(f, 'sha256').hexdigest()
+    return out
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="FireKB 流水线编排")
-    ap.add_argument("--skip-ocr", action="store_true", help="跳过 OCR 步骤")
-    ap.add_argument("--only", choices=ORDER, help="只运行某一步")
-    ap.add_argument("--from", dest="start", choices=ORDER, help="从某一步开始（含该步）")
-    ap.add_argument("--dry-run", action="store_true", help="只显示计划，不执行")
-    ap.add_argument("--extract-limit", type=int, help="传给 extract_kp 的 --limit（试跑用）")
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--course')
+    ap.add_argument('--skip-ocr', action='store_true')
+    ap.add_argument('--with-asr', action='store_true', help='包含本机课堂录音转写（已有文件跳过）')
+    ap.add_argument('--quality-ai', action='store_true', help='增加 60 条分层 AI 内容复核；按复核结果重新校验')
+    ap.add_argument('--pdf', action='store_true', help='课程导出时生成 PDF')
+    ap.add_argument('--only', choices=ORDER)
+    ap.add_argument('--from', dest='start', choices=ORDER)
+    ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--extract-limit', type=int)
+    ap.add_argument('--skeleton-mode', choices=['reuse', 'rebuild'], default='reuse')
+    ap.add_argument('--review-skeleton', action='store_true')
+    ap.add_argument('--resume', action='store_true')
     args = ap.parse_args()
-
-    if not TOOLS.exists():
-        print(f"[FAIL] 工具目录不存在：{TOOLS}")
-        return 2
-
-    todo = [s for s in STEPS]
-    if args.only:
-        todo = [s for s in todo if s[0] == args.only]
-    else:
-        if args.start:
-            i = ORDER.index(args.start)
-            todo = [s for s in todo if ORDER.index(s[0]) >= i]
-        if args.skip_ocr:
-            todo = [s for s in todo if s[0] != "ocr"]
-
-    print("=" * 76)
-    print(" FireKB 流水线")
-    print(f" 数据根目录：{ROOT}")
-    print(f" 计划执行 {len(todo)} 步：" + " -> ".join(s[0] for s in todo))
-    print("=" * 76)
+    course = kb.resolve_course(args.course)
+    if args.only in {'export','quality'} and not course:
+        ap.error('该环节需要 --course')
+    todo = [s for s in ORDER if not args.only or s == args.only]
+    if args.start:
+        todo = [s for s in todo if ORDER.index(s) >= ORDER.index(args.start)]
+    if args.skeleton_mode == 'reuse' and 'skeleton' in todo:
+        print('保留已有骨架，为新文件追加章节；完整重建使用 --skeleton-mode rebuild')
+    if not args.review_skeleton and args.only != 'skeleton_review':
+        todo = [s for s in todo if s != 'skeleton_review']
+    if args.skip_ocr:
+        todo = [s for s in todo if s != 'ocr']
+    if not args.with_asr and args.only != 'transcribe':
+        todo = [s for s in todo if s != 'transcribe']
+    elif args.only != 'transcribe':
+        from transcribe import AUDIO_EXTS
+        audio = [p for p in (kb.ARCHIVE/'录音').rglob('*') if p.is_file() and p.suffix.lower() in AUDIO_EXTS and (not course or course in p.parts)]
+        if not audio: todo = [s for s in todo if s != 'transcribe']
+    if not args.quality_ai and args.only != 'quality':
+        todo = [s for s in todo if s != 'quality']
+    if not course:
+        todo = [s for s in todo if s not in {'quality','export'}]
+    print('课程：', course or '全部', '；计划：', ' → '.join(todo))
     if args.dry_run:
-        for key, title, script, heavy in todo:
-            print(f"  [{key:<8}] {title}{'   (耗时步)' if heavy else ''}")
         return 0
+    params = {k:v for k,v in vars(args).items() if k not in ('resume', 'dry_run')}
+    inputs = digest([*kb.ARCHIVE.rglob('*'), *kb.CONFIG_DIR.glob('*.json'), *CODE.glob('tools/*.py')])
+    state_file = kb.LOG_DIR/'pipeline'/f'{kb.course_slug(course) if course else "all"}.json'
+    state = {'run_id': kb.new_run_id('PIPE'), 'params': params, 'inputs': inputs, 'completed': [], 'plan': todo}
+    artifacts = lambda: digest([p for d in (kb.TEXT_DIR, kb.KP_DIR) for p in d.glob('*')])
+    if args.resume:
+        old = kb.load_json(state_file, {})
+        if old.get('params') != params or old.get('inputs') != inputs or old.get('artifacts') != artifacts():
+            print('[STOP] 没有匹配的续跑记录，或输入/产物已变化；去掉 --resume 开始新运行。')
+            return 3
+        state = old
+        todo = [s for s in state['plan'] if s not in state['completed']]
+    for stage in todo:
+        cmd = [sys.executable, '-B', '-m', 'firekb', 'review-skel' if stage == 'skeleton_review' else stage]
+        if course:
+            cmd += ['--course', course]
+        if stage == 'skeleton_review':
+            cmd += ['--apply']
+        if stage == 'skeleton' and args.skeleton_mode == 'reuse': cmd += ['--append-new']
+        if stage == 'extract' and args.extract_limit:
+            cmd += ['--limit', str(args.extract_limit)]
+        if stage == 'transcribe': cmd += ['--no-vad']
+        if stage == 'quality' and args.quality_ai: cmd += ['--ai']
+        if stage == 'export' and args.pdf: cmd += ['--pdf']
+        proc = subprocess.run(cmd, cwd=CODE, env={**os.environ, 'FIREKB_ROOT': str(kb.ROOT)})
+        if stage == 'quality' and args.quality_ai and proc.returncode == 0:
+            proc = subprocess.run([sys.executable, '-B', '-m', 'firekb', 'verify', '--course', course],
+                                  cwd=CODE, env={**os.environ, 'FIREKB_ROOT': str(kb.ROOT)})
+        state['artifacts'] = artifacts()
+        state['last_stage'] = stage
+        state['exit_code'] = proc.returncode
+        if proc.returncode == 0:
+            state['completed'].append(stage)
+        kb.write_json(state_file, state)
+        if proc.returncode != 0:
+            print(f'[STOP] {stage} 失败（{proc.returncode}），后续步骤停止；记录：{state_file}')
+            return proc.returncode
+    print('流水线完成；记录：', state_file)
+    return 0
 
-    results: list[tuple[str, bool, float]] = []
-    t_all = time.time()
-    for key, title, script, _heavy in todo:
-        extra: list[str] = []
-        if key == "extract" and args.extract_limit:
-            extra = ["--limit", str(args.extract_limit)]
-        ok, dt = run_step(key, title, script, extra)
-        results.append((key, ok, dt))
-        if not ok and key in ("parse", "extract"):
-            # 关键步骤失败则中止，避免后续步骤基于错误数据继续
-            print(f"\n[中止] 关键步骤 {key} 失败，后续步骤不再执行。")
-            break
 
-    print("\n" + "=" * 76)
-    print(" 流水线结果汇总")
-    print("=" * 76)
-    for key, ok, dt in results:
-        print(f"  {'✔' if ok else '✘'} {key:<10}{dt:>8.1f} 秒")
-    print(f"\n总用时 {(time.time() - t_all) / 60:.1f} 分钟")
-    print(f"\n查看整体状态：python tools\\status.py")
-    if any(k == "review" and ok for k, ok, _ in results):
-        print(f"复习产物目录：{ROOT / '40_复习产物'}")
-    print("=" * 76)
-    return 0 if all(ok for _, ok, _ in results) else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+if __name__ == '__main__':
+    with kb.writer_lock():
+        sys.exit(main())

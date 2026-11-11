@@ -209,8 +209,9 @@ def main() -> int:
     print("\n" + "-" * 74)
     print(" M6 复习产物层")
     print("-" * 74)
-    cards = load_jsonl(REVIEW_DIR / "cards.jsonl")
-    files = sorted(p for p in REVIEW_DIR.glob("*") if p.is_file()) if REVIEW_DIR.exists() else []
+    active_review = REVIEW_DIR/'all' if (REVIEW_DIR/'all').exists() else REVIEW_DIR
+    cards = load_jsonl(active_review / "cards.jsonl")
+    files = sorted(p for p in active_review.glob("*") if p.is_file()) if active_review.exists() else []
     if not files:
         print("  尚无产物（python tools\\make_review.py）")
     else:
@@ -239,7 +240,7 @@ def main() -> int:
         steps.append("python tools\\build_skeleton.py       # 从教材构建知识骨架")
     if skel.exists() and not kps:
         steps.append("python tools\\extract_kp.py           # 抽取知识点（消耗 API）")
-    if kps and not audit:
+    if kps and verified_n < len(kps):
         steps.append("python tools\\verify_kp.py            # 校验知识点与原文一致性")
     if audit and not files:
         steps.append("python tools\\make_review.py          # 生成背诵卡与对照表")

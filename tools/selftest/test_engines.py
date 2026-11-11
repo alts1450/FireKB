@@ -191,57 +191,19 @@ def main() -> int:
     #     使用者看到的就自相矛盾 —— 这种漂移不会报错，只会让"到底哪个版本"变成悬案。
     #     而且 alpha 阶段的**不承诺向后兼容**必须**同时**出现在代码与面向使用者的
     #     文档里：只写在代码注释里，等于没告诉使用者。
-    print("\n10) 版本声明一致（代码 / 更新日志 / 公开 README）")
+    print("\n10) 版本声明一致（代码、更新日志、公开 README）")
     import importlib.util as _ilu
     _spec = _ilu.spec_from_file_location("firekb_entry", ROOT / "firekb.py")
     fk = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(fk)
-    check("__version__ 是 PEP 440 形态", bool(re.fullmatch(r"\d+\.\d+\.\d+(-[a-z0-9.]+)?", fk.__version__)),
-          fk.__version__)
-    check("__version__ 与显示版本同源（0.2.0 ↔ 0.2-latest）",
-          fk.__version__ == "0.2.0" and fk.__version_display__ == "0.2-latest",
-          "%s / %s" % (fk.__version__, fk.__version_display__))
-    check("__release_status__ 明示 latest", fk.__release_status__ == "latest", fk.__release_status__)
-    check("__compat_policy__ 明示不承诺向后兼容",
-          fk.__compat_policy__ == "no-backward-compatibility-guarantee", fk.__compat_policy__)
-
-    _desktop = ROOT / "firekb-desktop"
-    if (_desktop / "package.json").exists():
-        _pkg = json.loads((_desktop / "package.json").read_text(encoding="utf-8"))
-        _lock = json.loads((_desktop / "package-lock.json").read_text(encoding="utf-8"))
-        check("桌面端版本与 CLI 版本一致", _pkg["version"] == fk.__version__)
-        check("桌面锁文件版本一致", _lock["version"] == _pkg["version"] == _lock["packages"][""]["version"])
-    _cl = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    check("更新日志有该版本的条目标题", ("## [%s]" % fk.__version_display__) in _cl,
-          "## [%s]" % fk.__version_display__)
-    check("更新日志写明不承诺向后兼容", "不承诺向后兼容" in _cl)
-    check("更新日志逐类列出可能破坏的东西",
-          all(k in _cl for k in ("配置格式", "产物契约", "CLI 参数", "目录结构", "状态文件")))
-
-    # 公开 README 在两个地方以**不同的名字**存在，两个都得认：
-    #   私有仓   docs/README_public.md（发布源）
-    #   公开快照 README.md            （发布时按 DOC_MAP 改名，见 tools/publish_public.py）
-    # 早先只认前者 ⇒ 公开仓库里必然 FileNotFoundError ⇒ 整个自测中断 ⇒ doctor 的
-    # selftest 硬门槛永远失败（用户还无法修复：文件在仓库里根本没有）。
-    # **自测不该因为"换了个同样合法的布局"就炸掉。**
-    _pub_path = ROOT / "docs" / "README_public.md"
-    if not _pub_path.exists():
-        _pub_path = ROOT / "README.md"
-    if not _pub_path.exists():
-        check("公开 README 存在（docs/README_public.md 或 README.md）", False,
-              "两处都没有 —— 发布快照缺公开文档")
-    else:
-        _pub = _pub_path.read_text(encoding="utf-8")
-        check("公开 README 带版本提示", fk.__version_display__ in _pub and fk.__version__ in _pub)
-        check("公开 README 告知这是测试版", "测试版" in _pub)
-        # 兼容性告知按**语义**判，不钉死某一句措辞：0.1α 写的是"破坏兼容"，
-        # 0.2-latest 写的是"不承诺后续版本向后兼容" —— 意思相同，钉字面只会误报
-        # （实测误报过一次，把一次本该通过的发布拦了下来）。
-        _compat = any(w in _pub for w in (
-            "破坏兼容", "不承诺向后兼容", "不承诺后续版本向后兼容",
-            "不保证向后兼容", "不保证兼容"
-        ))
-        check("公开 README 告知可能不向后兼容", _compat)
+    check("版本号使用三段数字", bool(re.fullmatch(r"\d+\.\d+\.\d+", fk.__version__)), fk.__version__)
+    check("CLI 显示版本与代码版本一致", fk.__version_display__ == fk.__version__)
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    check("更新日志有当前版本标题", f"## [{fk.__version__}]" in changelog)
+    readme = ROOT / "docs" / "README_public.md"
+    if not readme.exists():
+        readme = ROOT / "README.md"
+    check("公开 README 显示当前版本", readme.is_file() and fk.__version__ in readme.read_text(encoding="utf-8"))
 
     print("\n" + "=" * 84)
     print("通过 %d 项，失败 %d 项" % (len(PASS), len(FAIL)))

@@ -26,9 +26,23 @@ import re
 import sys
 import time
 import unicodedata
+import tempfile
+import uuid
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
+
+
+def is_http_url(value):
+    if not isinstance(value, str) or any(char.isspace() or ord(char) < 32 for char in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        return parsed.scheme in {'http', 'https'} and bool(parsed.hostname) and parsed.username is None and parsed.password is None
+    except ValueError:
+        return False
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -109,15 +123,160 @@ def append_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def rewrite_jsonl(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    atomic_text(path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
 
 
 def write_json(path: Path, obj) -> None:
+    atomic_text(path, json.dumps(obj, ensure_ascii=False, indent=2))
+
+
+def atomic_text(path: Path, text: str) -> None:
+    """Replace only after a complete, flushed write on the same filesystem."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    fd, tmp = tempfile.mkstemp(prefix=".firekb-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def recover_dataset() -> None:
+    """Finish an interrupted multi-file commit before the next mutation."""
+    journal = ROOT / '.firekb-transaction.json'
+    if not journal.exists():
+        return
+    pending = json.loads(journal.read_text(encoding='utf-8'))
+    for row in pending['files']:
+        target, staged = ROOT / row['target'], ROOT / row['staged']
+        if not target.resolve().is_relative_to(ROOT.resolve()) or not staged.resolve().is_relative_to(ROOT.resolve()):
+            raise RuntimeError('数据提交清单路径越界，拒绝恢复')
+        if staged.exists():
+            with staged.open('rb') as f:
+                if hashlib.file_digest(f, 'sha256').hexdigest() != row['sha256']:
+                    raise RuntimeError('暂存数据校验失败，未覆盖原文件：' + str(target))
+            os.replace(staged, target)
+        with target.open('rb') as f:
+            if hashlib.file_digest(f, 'sha256').hexdigest() != row['sha256']:
+                raise RuntimeError('数据提交未完成，请从变更前备份恢复：' + str(target))
+    journal.unlink()
+
+
+def atomic_dataset(contents: dict[Path, object]) -> None:
+    """Stage all files, then publish a recovery journal before any replacement."""
+    recover_dataset()
+    rows = []
+    try:
+        for target, value in contents.items():
+            target = Path(target)
+            if not target.resolve().is_relative_to(ROOT.resolve()):
+                raise ValueError('数据文件必须位于项目目录内')
+            text = ''.join(json.dumps(x, ensure_ascii=False)+'\n' for x in value) if target.suffix == '.jsonl' else json.dumps(value, ensure_ascii=False, indent=2)
+            staged = target.with_name('.commit-'+uuid.uuid4().hex+'.tmp')
+            atomic_text(staged, text)
+            rows.append({'target': target.relative_to(ROOT).as_posix(), 'staged': staged.relative_to(ROOT).as_posix(), 'sha256': hashlib.sha256(text.encode()).hexdigest()})
+        write_json(ROOT/'.firekb-transaction.json', {'files': rows})
+    except BaseException:
+        for row in rows:
+            (ROOT/row['staged']).unlink(missing_ok=True)
+        raise
+    recover_dataset()
+
+
+def resolve_course(value: str | None) -> str | None:
+    """Stable ID or exact name only: a typo must never broaden a write scope."""
+    if not value:
+        return None
+    matches = [c for c in load_courses() if value in (c.get("id"), c.get("name"))]
+    library = (load_references() or {}).get('library', {})
+    if value in (library.get('id'), library.get('name'), library.get('course_dir')):
+        return library.get('course_dir') or library.get('name')
+    if len(matches) != 1:
+        raise ValueError(f"课程必须使用 courses.json 中的完整名称或唯一 ID：{value}")
+    return matches[0]["name"]
+
+
+def course_slug(course: str) -> str:
+    cfg = next((c for c in load_courses() if c.get("name") == course), {})
+    return re.sub(r"[^\w-]+", "_", cfg.get("id") or course)
+
+
+def backup_files(paths, label="mutation") -> Path:
+    import shutil
+    dest = LOG_DIR / "_备份" / f"{label}_{datetime.now():%Y%m%d-%H%M%S}_{uuid.uuid4().hex[:6]}"
+    manifest = []
+    for src in paths:
+        src = Path(src)
+        if src.is_file():
+            rel = src.resolve().relative_to(ROOT.resolve()).as_posix()
+            out = dest / 'files' / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, out)
+            with out.open('rb') as stream:
+                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            manifest.append({'path': rel, 'size': out.stat().st_size, 'sha256': digest})
+    write_json(dest/'manifest.json', {'created_at': now_iso(), 'label': label, 'files': manifest})
+    return dest
+
+
+_WRITER_GUARD = threading.RLock()
+_WRITER_LOCAL = threading.local()
+
+
+@contextmanager
+def writer_lock():
+    """OS-backed single writer; token lets pipeline subprocesses share ownership."""
+    lock = ROOT / ".firekb-writer.lock"
+    if getattr(_WRITER_LOCAL, 'active', False):
+        yield
+        return
+    token = os.environ.get("FIREKB_WRITER_TOKEN")
+    if token and not token.startswith(f'{os.getpid()}:') and lock.exists():
+        try:
+            # Windows locks byte zero against reads by another process as well.
+            with lock.open('rb') as owner:
+                owner.seek(1)
+                actual_token = owner.read().decode('ascii').strip()
+            if actual_token == token:
+                yield
+                return
+        except OSError:
+            pass
+    ROOT.mkdir(parents=True, exist_ok=True)
+    if not _WRITER_GUARD.acquire(blocking=False):
+        raise RuntimeError('已有任务正在写入 FireKB，请稍后重试')
+    f = lock.open("a+b")
+    old = os.environ.get("FIREKB_WRITER_TOKEN")
+    try:
+        f.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            if not lock.stat().st_size:
+                f.write(b" "); f.flush(); f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError("已有任务正在写入 FireKB，请等该任务结束后重试") from exc
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        token = f'{os.getpid()}:{uuid.uuid4().hex}'
+        f.seek(0); f.truncate(); f.write(b' ' + token.encode("ascii")); f.flush()
+        os.environ["FIREKB_WRITER_TOKEN"] = token
+        _WRITER_LOCAL.active = True
+        recover_dataset()
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("FIREKB_WRITER_TOKEN", None)
+        else:
+            os.environ["FIREKB_WRITER_TOKEN"] = old
+        f.close()
+        _WRITER_LOCAL.active = False
+        _WRITER_GUARD.release()
 
 
 def load_json(path: Path, default=None):
@@ -837,6 +996,10 @@ def chunk_fingerprint(chunk: dict) -> str:
     if chars is None:
         chars = len(text)
     return f"p{chunk.get('page_start')}-{chunk.get('page_end')}|c{chars}|h{h}"
+
+
+def full_chunk_fingerprint(chunk: dict) -> str:
+    return hashlib.sha256((chunk.get('text') or '').encode('utf-8')).hexdigest()
 
 
 def assign_chunk_ids(chunks: list[dict]) -> list[dict]:

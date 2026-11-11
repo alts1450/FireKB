@@ -1,13 +1,17 @@
 import { useState, useRef, useEffect } from 'react'
 import './ProcessControl.css'
+import type { Course } from '../../types/electron'
 
 interface ProcessControlProps {
   materials: string[]
+  courses: Course[]
   isProcessing: boolean
   onProcessingChange: (processing: boolean) => void
 }
 
-export default function ProcessControl({ materials, isProcessing, onProcessingChange }: ProcessControlProps) {
+export default function ProcessControl({ materials, courses, isProcessing, onProcessingChange }: ProcessControlProps) {
+  const [course, setCourse] = useState('')
+  const command = (name: string, args: string[] = []) => window.electronAPI.runCommand(name, [...args, ...(course ? ['--course', course] : [])])
   const [logs, setLogs] = useState<string[]>([])
   const [currentStep, setCurrentStep] = useState<string>('')
   const logsContentRef = useRef<HTMLDivElement>(null)
@@ -39,7 +43,7 @@ export default function ProcessControl({ materials, isProcessing, onProcessingCh
     addLog('开始解析文档...')
 
     try {
-      const result = await window.electronAPI.runCommand('parse')
+      const result = await command('parse')
       if (result.success) {
         addLog('✅ 文档解析完成')
       } else {
@@ -59,14 +63,14 @@ export default function ProcessControl({ materials, isProcessing, onProcessingCh
     addLog('开始 OCR 识别...')
 
     try {
-      const result = await window.electronAPI.runCommand('ocr', ['--check'])
+      const result = await command('ocr', ['--check'])
       if (!result.success) {
         addLog(`❌ OCR 检查失败: ${result.stderr}`)
         return
       }
 
       if (confirm('确认执行 OCR 识别？这可能需要较长时间。')) {
-        const ocrResult = await window.electronAPI.runCommand('ocr')
+        const ocrResult = await command('ocr')
         if (ocrResult.success) {
           addLog('✅ OCR 识别完成')
         } else {
@@ -87,7 +91,7 @@ export default function ProcessControl({ materials, isProcessing, onProcessingCh
     addLog('开始构建知识骨架...')
 
     try {
-      const result = await window.electronAPI.runCommand('skeleton')
+      const result = await command('skeleton', ['--append-new'])
       if (result.success) {
         addLog('✅ 知识骨架构建完成')
       } else {
@@ -107,12 +111,12 @@ export default function ProcessControl({ materials, isProcessing, onProcessingCh
     addLog('开始抽取知识点（试跑 3 条）...')
 
     try {
-      const result = await window.electronAPI.runCommand('extract', ['--limit', '3'])
+      const result = await command('extract', ['--limit', '3'])
       if (result.success) {
         addLog('✅ 知识点抽取完成（试跑）')
         if (confirm('试跑成功，是否执行全量抽取？这将消耗 API 额度。')) {
           addLog('开始全量抽取...')
-          const fullResult = await window.electronAPI.runCommand('extract')
+          const fullResult = await command('extract')
           if (fullResult.success) {
             addLog('✅ 全量抽取完成')
           } else {
@@ -136,7 +140,7 @@ export default function ProcessControl({ materials, isProcessing, onProcessingCh
     addLog('开始校验知识点...')
 
     try {
-      const result = await window.electronAPI.runCommand('verify')
+      const result = await command('verify')
       if (result.success) {
         addLog('✅ 知识点校验完成')
       } else {
@@ -150,6 +154,14 @@ export default function ProcessControl({ materials, isProcessing, onProcessingCh
     }
   }
 
+  const runStage = async (stage: string, args: string[] = []) => {
+    onProcessingChange(true); setCurrentStep(stage)
+    addLog(`开始 ${stage}，范围：${course || '全部课程'}`)
+    try { const result = await command(stage, args); addLog(result.success ? `✅ ${stage} 完成` : `❌ ${stage} 失败：${result.stderr || result.stdout}`) }
+    catch (error) { addLog(`❌ ${String(error)}`) }
+    finally { onProcessingChange(false); setCurrentStep('') }
+  }
+
   const handleClearLogs = () => {
     setLogs([])
   }
@@ -159,7 +171,10 @@ export default function ProcessControl({ materials, isProcessing, onProcessingCh
     { id: 'ocr', label: '2. OCR 识别', handler: handleOCR, description: '识别影印版文档的文字（可选）' },
     { id: 'skeleton', label: '3. 构建骨架', handler: handleBuildSkeleton, description: '生成课程章节结构' },
     { id: 'extract', label: '4. 抽取知识点', handler: handleExtract, description: '使用 AI 提取知识点' },
-    { id: 'verify', label: '5. 校验验证', handler: handleVerify, description: '核验引用和数据完整性' }
+    { id: 'verify', label: '5. 校验验证', handler: handleVerify, description: '核验引用和数据完整性' },
+    { id: 'ai-review', label: 'AI 自查预览（Flash）', handler: () => runStage('ai-review',['--dry-run']), description: '免费预览范围与费用上限；开始核验请在结果输出页设置每批数量和预算' },
+    { id: 'review', label: '6. 生成复习产物', handler: () => runStage('review'), description: '按课程输出卡片、数字表和 Anki' },
+    { id: 'transcribe', label: '录音转写', handler: () => runStage('transcribe',['--no-vad']), description: '本地转写，仅作辅助参考' }
   ]
 
   return (
@@ -168,6 +183,7 @@ export default function ProcessControl({ materials, isProcessing, onProcessingCh
         <h3 className="panel-title">处理流程</h3>
         <p className="panel-subtitle">按顺序执行；素材须先放入项目归档目录。重建骨架会覆盖既有结构与人工复核。</p>
 
+        <div className="process-scope"><label>处理范围<select aria-label="处理课程" value={course} disabled={isProcessing} onChange={e=>setCourse(e.target.value)}><option value="">全部课程</option>{courses.filter(c=>c.category!=='reference').map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label><div><button className="btn btn-secondary" disabled={isProcessing||!course} onClick={()=>void runStage('pipeline',['--with-asr','--pdf'])}>运行课程流程</button><button className="btn-text" disabled={isProcessing||!course} onClick={()=>void runStage('pipeline',['--with-asr','--pdf','--resume'])}>从失败处续跑</button></div></div>
         <div className="steps-list">
           {steps.map(step => (
             <div key={step.id} className="step-card">

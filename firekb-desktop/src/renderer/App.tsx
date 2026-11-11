@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import type { PointerEvent } from 'react'
 import type { Course } from '../types/electron'
 import './App.css'
+import KnowledgeChat from './components/KnowledgeChat'
 import Sidebar from './components/Sidebar'
 import Header from './components/Header'
 import MaterialInput from './components/MaterialInput'
@@ -9,9 +10,12 @@ import ProcessControl from './components/ProcessControl'
 import OutputPanel from './components/OutputPanel'
 import ModelConfig from './components/ModelConfig'
 import useAppearance from './useAppearance'
+import TimetablePanel from './components/TimetablePanel'
 
-export type View = 'input' | 'process' | 'output' | 'models'
+export type View = 'chat' | 'input' | 'process' | 'output' | 'models' | 'timetable'
 const VIEW_META: Record<View, { title: string; subtitle: string; label: string }> = {
+  chat: { title: '和你的知识库，聊一聊。', subtitle: '结合课程知识点回答，保留每一处引用。', label: '知识对话' },
+  timetable: { title: '按课表，整理每一份素材。', subtitle: '编辑上课时段、周次和标题别名，让录音归回课程。', label: '课表设置' },
   input: { title: '从素材开始，构建你的知识库。', subtitle: '整理课件与教材，让每一个知识点都有据可查。', label: '素材输入' },
   process: { title: '让知识，逐步清晰。', subtitle: '从页级文本到引用核验，按顺序完成知识整理。', label: '处理控制' },
   output: { title: '你的知识，随时可查。', subtitle: '按课程浏览知识点，保留原始文件与页码出处。', label: '结果输出' },
@@ -19,8 +23,8 @@ const VIEW_META: Record<View, { title: string; subtitle: string; label: string }
 }
 function App() {
   const appearance = useAppearance()
-  const [currentView, setCurrentView] = useState<View>('input')
-  const [visited, setVisited] = useState<View[]>(['input'])
+  const [currentView, setCurrentView] = useState<View>('chat')
+  const [visited, setVisited] = useState<View[]>(['chat'])
   const [materials, setMaterials] = useState<string[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
   const [courses, setCourses] = useState<Course[]>([])
@@ -64,13 +68,15 @@ function App() {
         <div className={`content-area ${currentView === 'input' ? 'content-area-input' : ''}`}>
           {visited.map(view => (
             <section key={view} className="view-panel" hidden={view !== currentView} aria-label={VIEW_META[view].label}>
+              {view === 'chat' && <KnowledgeChat courses={courses} />}
               {view === 'input' && <MaterialInput materials={materials}
                 onAdd={paths => setMaterials(prev => [...new Set([...prev, ...paths.filter(Boolean)])])}
                 onRemove={path => setMaterials(prev => prev.filter(item => item !== path))}
-                onClear={() => setMaterials([])} onContinue={() => navigate('process')} />}
-              {view === 'process' && <ProcessControl materials={materials} isProcessing={isProcessing} onProcessingChange={setIsProcessing} />}
-              {view === 'output' && <OutputPanel selectedCourse={selectedCourse} courses={courses} active={currentView === 'output'} isProcessing={isProcessing} onProcessingChange={setIsProcessing} />}
+                onClear={() => setMaterials([])} onContinue={() => navigate('process')} onTimetable={() => navigate('timetable')} />}
+              {view === 'process' && <ProcessControl materials={materials} courses={courses} isProcessing={isProcessing} onProcessingChange={setIsProcessing} />}
+              {view === 'output' && <OutputPanel selectedCourse={selectedCourse} courses={courses} onCoursesChanged={async () => setCourses(await window.electronAPI.getCourses())} active={currentView === 'output'} isProcessing={isProcessing} onProcessingChange={setIsProcessing} />}
               {view === 'models' && <ModelConfig />}
+              {view === 'timetable' && <TimetablePanel onSaved={() => { void window.electronAPI.getCourses().then(setCourses) }} />}
             </section>
           ))}
         </div>

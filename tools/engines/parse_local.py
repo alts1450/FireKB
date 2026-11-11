@@ -55,7 +55,7 @@ class LocalPymupdfParser(BaseEngine):
         note="pymupdf 为 AGPL-3.0 双许可（Artifex 商业许可可选）；本项目不随包分发它。",
     )
 
-    SUFFIX_FN = {".pdf": "parse_pdf", ".pptx": "parse_pptx", ".epub": "parse_epub"}
+    SUFFIX_FN = {".pdf": "parse_pdf", ".pptx": "parse_pptx", ".epub": "parse_epub", ".docx": "parse_docx"}
 
     def supports(self, suffix: str) -> bool:
         return suffix.lower() in self.SUFFIX_FN

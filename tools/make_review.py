@@ -41,6 +41,7 @@ ROOT = Path(os.environ.get("FIREKB_ROOT") or Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import kb  # noqa: E402
+from math_format import display
 
 OUT = kb.REVIEW_DIR
 
@@ -51,11 +52,21 @@ def stars(n: int) -> str:
 
 
 def short_src(kp: dict) -> str:
+    if kp.get('source_type')=='network':return '网络 · 对话批注收录'
     sf = (kp.get("source_file") or "").split("/")[-1]
     sf = sf.split("(")[0].strip()[:34]
     a = kp.get("page_label_start") or ""
     b = kp.get("page_label_end") or ""
-    rng = f"{a}" if a == b or not b else f"{a}–{b}"
+    def ref(label):
+        n = re.search(r"\d+", str(label))
+        if kp.get('source_file', '').lower().endswith('.pptx'):
+            return f'幻灯片 {n.group()}' if n else str(label)
+        if kp.get('source_file', '').lower().endswith('.docx'):
+            return str(label)
+        from parse_docs import file_id_of
+        file_id = file_id_of(kp.get('source_file', ''))
+        return kb.page_ref(kp.get('course', ''), int(n.group()), file_id=file_id, label=label) if n else label
+    rng = ref(a) if a == b or not b else f"{ref(a)}–{ref(b)}"
     return f"{sf} {rng}".strip()
 
 
@@ -93,6 +104,10 @@ def cross_book_dedup(kps: list[dict], ev_by_kp: dict) -> tuple[list[dict], int]:
             members[0].setdefault("alt_sources", [])
             kept.append(members[0])
             continue
+        # Different numeric statements may have different conditions or editions.
+        if len({tuple(sorted(map(str, m.get('numbers') or []))) for m in members}) > 1:
+            kept.extend(members)
+            continue
 
         def rank(k: dict):
             n_ok = sum(1 for e in ev_by_kp.get(k.get("kp_id"), []) if e.get("quote_verified"))
@@ -128,6 +143,7 @@ def alt_note(kp: dict) -> str:
 
 
 def main() -> int:
+    global OUT
     ap = argparse.ArgumentParser(description="M6 复习产物生成")
     ap.add_argument("--course", help="只输出某门课")
     ap.add_argument("--level", type=int, default=0, help="只输出重要度 >= N 的知识点（考前突击用）")
@@ -136,6 +152,8 @@ def main() -> int:
     ap.add_argument("--include-experimental", action="store_true",
                     help="把已登记的实验批次知识点也列入正文（默认排除；见 00_配置/experimental-batches.json）")
     args = ap.parse_args()
+    args.course = kb.resolve_course(args.course)
+    OUT = kb.REVIEW_DIR / (kb.course_slug(args.course) if args.course else "all")
 
     kps = kb.load_jsonl(kb.KP_FILE)
     evs = kb.load_jsonl(kb.EVIDENCE_FILE)
@@ -155,7 +173,7 @@ def main() -> int:
     exp_batches = sorted({(kb.is_experimental_kp(k) or {}).get("id") for k in exp_rows} - {None})
 
     if args.course:
-        kps = [k for k in kps if args.course in (k.get("course") or "")]
+        kps = [k for k in kps if args.course == k.get("course")]
         ids = {k["kp_id"] for k in kps}
         evs = [e for e in evs if e.get("kp_id") in ids]
         audits = [a for a in audits if a.get("kp_id") in ids]
@@ -173,9 +191,23 @@ def main() -> int:
     # 人工复核判定不可用的（review_queue --apply 写 status=rejected）——
     # 必须排除，否则"人已经判过是错的"内容还会照样进背诵卡（那这个裁决就白做了）。
     rejected_ids = {k["kp_id"] for k in kps if k.get("status") == "rejected"}
-    pending_audits = [a for a in audits if a.get("priority") == "P0"]
+    pending_audits = [a for a in audits if (a.get("priority") == "P0" or a.get('type') == 'quote_partial') and a.get("status", "pending") == "pending"]
 
     usable = [k for k in kps if args.include_pending or k["kp_id"] not in pending_ids]
+    usable = [k for k in usable if not kb.is_reference_source(k.get("source_file", ""))]
+    unaccepted=[]
+    if not args.include_pending:
+        import review_state
+        from verify_kp import build_page_index, source_text_of
+        source_index = build_page_index()
+        accepted = []
+        for k in usable:
+            es = ev_by_kp.get(k['kp_id'], [])
+            rev = review_state.revision(k, es, source_text_of(k, es, source_index)) if k.get('verification_method') in {'ai_web','human'} or any(e.get('human_verified') or e.get('ai_verification') for e in es) else ''
+            if es and review_state.content_decision_accepted(k,audits,rev) and all(review_state.evidence_accepted(e, rev) for e in es):
+                accepted.append(k)
+            else:unaccepted.append(k)
+        usable = accepted
     excluded = [k for k in kps if k["kp_id"] in pending_ids and not args.include_pending]
 
     rej_excluded = [k for k in usable if k.get("kp_id") in rejected_ids]
@@ -213,8 +245,8 @@ def main() -> int:
         "# 待确认清单（这些内容**不要背**）", "",
         f"生成时间：{ts}　范围：{scope}", "",
         "> 本清单中的知识点未通过机器校验（引用在原文中找不到、数字对不上、定义缺失等）。",
-        "> 在人工核对前，**不得用于背诵**。处理方式：打开对应文件的原页核对，",
-        "> 确认无误后在知识点库中把 status 改为 verified，或驳回删除。", "",
+        "> 可先运行 ai-review 联网自查；证据评分≥80%且关键检查通过后会自动纳入背诵。75%–80%标记接近通过，其余在核验通过前**不得用于背诵**。",
+        "> 请使用 queue 导出的裁决表逐项记录 ok / bad / skip，再由 queue --apply 回写并保留版本。", "",
     ]
     if pending_audits:
         lines.append(f"共 {len(pending_audits)} 条，按课程分组：")
@@ -231,11 +263,14 @@ def main() -> int:
                              f"{a.get('detail')} | {a.get('suggestion') or '-'} |")
             lines.append("")
     else:
-        lines.append("当前没有 P0 问题。全部知识点均已通过机器校验。")
+        lines.append("当前没有阻止进入正文的待确认问题。引用和数字的机器校验不等于人工内容审定。")
         lines.append("")
     if excluded:
         lines.append(f"（另有 {len(excluded)} 个知识点因未通过校验已在下方各部分中排除，"
                      f"如需强制包含请加 --include-pending）")
+    if unaccepted:
+        lines += ['', '以下条目的引用或内容核验记录未通过当前版本检查，已从背诵材料中排除；请重新 verify / ai-review：','']
+        lines += [f"- `{k['kp_id']}` {k.get('name','')}" for k in unaccepted]
     if exp_excluded:
         # 实验批次必须在这里**显式露面**：产物是用户真正会看的东西，
         # 只在控制台打印一句，用户回头看书时是不知道的 —— 这才是要防的"静默"。
@@ -319,7 +354,7 @@ def main() -> int:
             lines.append("")
             lines.append(f"**问：** {k.get('name')}是什么？")
             lines.append("")
-            lines.append(f"**答：** {k.get('definition')}")
+            lines.append(f"**答：** {display(k)}")
             lines.append("")
             if k.get("numbers"):
                 lines.append(f"**关键数值：** {'、'.join(str(x) for x in k['numbers'])}")
@@ -329,7 +364,13 @@ def main() -> int:
                 lines.append("")
             lines.append(f"**出处：** {short_src(k)}　·　`{k.get('kp_id')}`")
             lines.append("")
+            if k.get('verification_method')=='ai_web':
+                receipt=k['ai_verification']
+                lines += [f"**AI 联网核验：** {receipt['score']:.1%}（证据评分） · {receipt.get('scope','')} · 有效至 {receipt.get('valid_until','')[:10]}",'']
+                lines += [f"- [{s['title']}]({s['url']})" for s in receipt.get('sources',[])]
+                lines += ['']
             _alt = alt_note(k)
+            if review_state.human_label(k):lines += [review_state.human_label(k),'']
             if _alt:
                 lines.append(_alt)
                 lines.append("")
@@ -342,12 +383,15 @@ def main() -> int:
                 "course": course,
                 "chapter": k.get("chapter"),
                 "question": f"{k.get('name')}是什么？",
-                "answer": k.get("definition"),
+                "answer": display(k),
                 "numbers": k.get("numbers") or [],
                 "quote": quote,
                 "source": short_src(k),
                 "alt_sources": k.get("alt_sources") or [],
                 "importance": int(k.get("importance") or 3),
+                "verification_method":k.get('verification_method','source_rules'),
+                "human_review":k.get('human_review') if k.get('verification_method')=='human' else None,
+                "ai_verification":k.get('ai_verification') if k.get('verification_method')=='ai_web' else None,
                 "card_type": "data" if k.get("numbers") else
                              ("method" if k.get("type") in ("方法", "原理") else "concept"),
             })
@@ -359,7 +403,7 @@ def main() -> int:
     num_kps = [k for k in usable if k.get("numbers")]
     lines = ["# 数字对照表", "", f"生成时间：{ts}　范围：{scope}", "",
              "> 消防考试里数字错一个就是丢分。本表把散落在各章节的数值集中到一处对比记忆。",
-             "> **所有数值均已通过原文核验**（未通过的已排除到待确认清单）。", ""]
+             "> 数值经本地原文规则核验、人工裁决或带评分记录的 AI 联网核验；未通过的已排除到待确认清单。", ""]
     by_course_num: dict[str, list[dict]] = defaultdict(list)
     for k in num_kps:
         by_course_num[k.get("course") or "未分类"].append(k)
@@ -403,17 +447,22 @@ def main() -> int:
                 if k.get("aliases"):
                     lines.append(f"- **别名**：{'、'.join(k['aliases'])}")
                 lines.append("")
-                lines.append(f"{k.get('definition')}")
+                lines.append(f"{display(k)}")
                 lines.append("")
+                if k.get('verification_method')=='ai_web':
+                    lines += [f"**AI 联网核验：** {k['ai_verification']['score']:.1%}（证据评分）",'']
+                    lines += [f"- [{s['title']}]({s['url']})" for s in k['ai_verification'].get('sources',[])]
+                    lines += ['']
                 if k.get("numbers"):
                     lines.append(f"- **数值**：{'、'.join(str(x) for x in k['numbers'])}")
+                if review_state.human_label(k):lines += [review_state.human_label(k),'']
                 if k.get("note"):
                     lines.append(f"- **提示**：{k.get('note')}")
                 lines.append("")
                 for e in ev_by_kp.get(k["kp_id"], [])[:2]:
                     if not e.get("quote"):
                         continue
-                    mark = "" if e.get("quote_verified") else "（未核验）"
+                    mark = "" if e.get("quote_verified") else "（人工核验通过）" if k.get('verification_method')=='human' else "（本地引文未精确匹配；知识内容已通过AI联网核验）" if k.get('verification_method')=='ai_web' else "（未核验）"
                     lines.append(f"> {e['quote']}{mark}　—　{e.get('page_label')}")
                     lines.append("")
     (OUT / "04_脉络展开.md").write_text("\n".join(lines), encoding="utf-8")
@@ -429,7 +478,11 @@ def main() -> int:
             (c.get("chapter") or "").replace(" ", "_"),
             f"imp{c['importance']}",
         ] if x)
-        w.writerow([c["question"], c["answer"], tags, c["source"]])
+        attribution=c['source']
+        if c.get('human_review'):attribution+=' | '+review_state.human_label(c)
+        if c.get('ai_verification'):
+            attribution+=f" | AI联网核验 {c['ai_verification']['score']:.1%} | "+' ; '.join(s['url'] for s in c['ai_verification'].get('sources',[]))
+        w.writerow([c["question"], __import__("re").sub(r"\$([^$]+)\$", lambda m: "\\("+m[1]+"\\)", c["answer"]), tags, attribution])
     (OUT / "05_anki导入.tsv").write_text(buf.getvalue(), encoding="utf-8-sig")
     written.append(("05_anki导入.tsv", len(cards)))
 
@@ -460,4 +513,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    with kb.writer_lock():
+        sys.exit(main())

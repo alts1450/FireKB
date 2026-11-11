@@ -458,10 +458,10 @@ def main() -> int:
 
     # ---- 录音 ----
     if d["audio_dirs"]:
-        infos.append(f"录音目录（权重 3 · 仅供参考，不作引用来源）：{', '.join(d['audio_dirs'])}")
+        infos.append(f"录音目录（权重 3 · 课堂辅助资料）：{', '.join(d['audio_dirs'])}")
 
     # ---- 复习产物新鲜度 ----
-    prod_files = sorted([p for p in kb.REVIEW_DIR.glob("*") if p.is_file()],
+    prod_files = sorted([p for p in kb.REVIEW_DIR.rglob("*") if p.is_file() and 'review-queue' not in p.parts],
                         key=lambda p: p.stat().st_mtime, reverse=True) if kb.REVIEW_DIR.exists() else []
     if not prod_files:
         warns.append("[产物] 40_复习产物 为空 → M6 未跑")

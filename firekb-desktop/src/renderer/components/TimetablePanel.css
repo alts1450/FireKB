@@ -1,0 +1,33 @@
+.timetable-panel { max-width: 1100px; margin: 0 auto; padding-bottom: 18px; }
+.timetable-panel fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.timetable-toolbar,.timetable-section { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.timetable-toolbar > div,.timetable-section > div { display: flex; gap: 8px; flex-wrap: wrap; }
+.timetable-toolbar > p,.timetable-hint,.timetable-message { font-size: 11px; color: var(--text-tertiary); line-height: 1.9; }
+.timetable-hint { margin: 12px 0; }
+.timetable-message { margin-top: 14px; color: var(--accent); }
+.timetable-term { display: grid; grid-template-columns: 1.4fr .7fr 1.3fr 1fr; gap: 14px; padding: 16px 0; }
+.timetable-term label { display: flex; flex-direction: column; gap: 7px; color: var(--text-secondary); font-size: 11px; }
+.timetable-panel input,.timetable-panel select,.intake-preview select { width: 100%; min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-1); color: var(--text-primary); font-size: 11px; }
+.timetable-panel input[readonly] { color: var(--text-tertiary); background: var(--surface-2); }
+.timetable-section { margin: 23px 0 12px; }
+.timetable-section h3 { font-size: 12px; font-weight: 500; }
+.timetable-section h3 span { margin-left: 8px; font-size: 10px; font-weight: 400; color: var(--text-tertiary); }
+.timetable-table { overflow-x: auto; border: 1px solid var(--line); border-radius: 11px; }
+.timetable-table table { width: 100%; border-collapse: collapse; text-align: left; font-size: 11px; }
+.timetable-table th { padding: 10px 12px; color: var(--text-tertiary); font-weight: 400; background: var(--surface-1); white-space: nowrap; }
+.timetable-table td { padding: 8px; border-top: 1px solid var(--line); }
+.timetable-table td:first-child { min-width: 130px; }
+.timetable-table input[type="time"] { min-width: 86px; }
+.timetable-table input[type="date"] { min-width: 115px; }
+.timetable-table input[placeholder] { min-width: 90px; }
+.timetable-empty { color: var(--text-tertiary); font-size: 11px; text-align: center; padding: 23px; }
+.intake-preview { border-top: 1px solid var(--line); padding-top: 16px; }
+.intake-preview .timetable-toolbar h3 { font-size: 12px; font-weight: 500; }
+.intake-row { display: grid; grid-template-columns: 18px minmax(150px,1.2fr) minmax(130px,1fr); gap: 10px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.intake-row input { accent-color: var(--accent); }
+.intake-filename { font-size: 11px; color: var(--text-primary); overflow-wrap: anywhere; }
+.intake-reason { display: block; color: var(--text-tertiary); font-size: 10px; line-height: 1.8; margin-top: 4px; }
+.intake-row select + select { margin-top: 5px; }
+.intake-actions { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding-top: 14px; }
+.intake-actions span { font-size: 10px; color: var(--text-tertiary); }
+@media (max-width: 1050px) { .timetable-term { grid-template-columns: 1fr 1fr; } }

@@ -57,3 +57,13 @@ s3_*.err
 .idea/
 Thumbs.db
 desktop.ini
+.firekb-writer.lock
+.firekb-transaction.json
+.playwright-cli/
+00_配置/timetable.json
+00_配置/source-assignments.json
+00_配置/course-manifest.json
+00_配置/courses.json
+00_配置/references.json
+00_配置/page-offsets.json
+00_配置/experimental-batches.json
